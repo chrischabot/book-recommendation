@@ -1,0 +1,149 @@
+# Category definitions for recommendation filtering
+# Each category maps to Open Library subjects with optional constraints
+
+science-fiction:
+  include:
+    - science_fiction
+    - sf
+  exclude:
+    - juvenile_fiction
+  years: "1950-"
+  description: Classic and modern science fiction
+
+hard-sci-fi:
+  include:
+    - science_fiction
+    - hard_science_fiction
+  years: "1980-"
+  description: Hard science fiction with scientific rigor
+
+space-opera:
+  include:
+    - science_fiction
+    - space_opera
+  description: Epic space adventures
+
+cyberpunk:
+  include:
+    - science_fiction
+    - cyberpunk
+  years: "1980-"
+  description: High tech, low life futures
+
+high-fantasy:
+  include:
+    - fantasy
+    - high_fantasy
+    - epic_fantasy
+  description: Epic fantasy worlds and quests
+
+urban-fantasy:
+  include:
+    - fantasy
+    - urban_fantasy
+  description: Fantasy in modern urban settings
+
+literary-fiction:
+  include:
+    - literary_fiction
+    - fiction
+  exclude:
+    - genre_fiction
+    - romance
+  description: Literary and contemporary fiction
+
+mystery:
+  include:
+    - mystery
+    - detective_fiction
+    - crime_fiction
+  description: Mystery and detective stories
+
+thriller:
+  include:
+    - thriller
+    - suspense
+  description: Thrillers and suspense novels
+
+horror:
+  include:
+    - horror
+    - supernatural
+  description: Horror and supernatural fiction
+
+romance:
+  include:
+    - romance
+    - love_stories
+  exclude:
+    - erotica
+  description: Romance novels
+
+historical-fiction:
+  include:
+    - historical_fiction
+    - history
+  description: Fiction set in historical periods
+
+biography:
+  include:
+    - biography
+    - autobiography
+    - memoirs
+  description: Biographies and memoirs
+
+biography-20th:
+  include:
+    - biography
+    - twentieth_century
+  description: 20th century biographies
+
+business:
+  include:
+    - business
+    - entrepreneurship
+    - management
+  description: Business and entrepreneurship
+
+business-narrative:
+  include:
+    - business
+    - nonfiction
+    - economics
+  description: Narrative business books
+
+self-help:
+  include:
+    - self-help
+    - personal_development
+    - psychology
+  description: Self-improvement and personal development
+
+philosophy:
+  include:
+    - philosophy
+    - ethics
+  description: Philosophy and ethics
+
+history:
+  include:
+    - history
+    - world_history
+  exclude:
+    - historical_fiction
+  description: History and historical analysis
+
+science:
+  include:
+    - science
+    - popular_science
+  exclude:
+    - science_fiction
+  description: Popular science and scientific topics
+
+technology:
+  include:
+    - technology
+    - computers
+    - programming
+  description: Technology and computing

@@ -1,0 +1,469 @@
+/* Google Fonts Import - must be first */
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,400&family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================
+   LITERARY SALON - Design System
+   A warm, editorial aesthetic for book lovers
+   ============================================ */
+
+@layer base {
+  :root {
+    /* === Color Palette === */
+    /* Warm cream backgrounds */
+    --background: 36 33% 97%;
+    --background-warm: 36 40% 95%;
+    --background-paper: 40 30% 98%;
+
+    /* Rich charcoal text */
+    --foreground: 20 14% 12%;
+    --foreground-muted: 20 8% 40%;
+    --foreground-subtle: 20 6% 55%;
+
+    /* Card & Surface colors */
+    --card: 0 0% 100%;
+    --card-foreground: 20 14% 12%;
+    --card-hover: 36 30% 99%;
+
+    /* Primary - Muted Gold/Amber */
+    --primary: 36 72% 45%;
+    --primary-foreground: 36 10% 98%;
+    --primary-hover: 36 72% 40%;
+    --primary-muted: 36 40% 85%;
+
+    /* Secondary - Forest Green */
+    --secondary: 150 25% 25%;
+    --secondary-foreground: 150 10% 98%;
+    --secondary-muted: 150 15% 90%;
+
+    /* Accent - Warm terracotta */
+    --accent: 15 60% 55%;
+    --accent-foreground: 15 10% 98%;
+    --accent-muted: 15 40% 92%;
+
+    /* UI Colors */
+    --muted: 36 15% 92%;
+    --muted-foreground: 20 8% 45%;
+
+    --border: 36 20% 88%;
+    --border-strong: 36 15% 75%;
+
+    --input: 36 20% 88%;
+    --ring: 36 72% 45%;
+
+    /* Quality Badge Colors */
+    --quality-aplus: 152 60% 40%;
+    --quality-a: 152 50% 45%;
+    --quality-aminus: 140 45% 50%;
+    --quality-bplus: 200 50% 50%;
+    --quality-b: 200 40% 60%;
+    --quality-bminus: 20 10% 60%;
+
+    /* Rating Star */
+    --star: 45 93% 47%;
+
+    /* Shadows */
+    --shadow-color: 30 30% 30%;
+    --shadow-book: 0 4px 20px -4px hsl(var(--shadow-color) / 0.15),
+                   0 8px 40px -8px hsl(var(--shadow-color) / 0.1);
+    --shadow-book-hover: 0 8px 30px -4px hsl(var(--shadow-color) / 0.2),
+                         0 16px 50px -8px hsl(var(--shadow-color) / 0.15);
+    --shadow-card: 0 1px 3px hsl(var(--shadow-color) / 0.08),
+                   0 4px 12px hsl(var(--shadow-color) / 0.05);
+
+    /* Spacing & Radius */
+    --radius: 0.625rem;
+    --radius-lg: 1rem;
+    --radius-sm: 0.375rem;
+
+    /* Typography Scale */
+    --font-display: 'Fraunces', Georgia, serif;
+    --font-serif: 'Cormorant Garamond', Georgia, serif;
+    --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
+
+    /* Transitions */
+    --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-slow: 400ms cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-book: 350ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  .dark {
+    --background: 20 15% 8%;
+    --background-warm: 20 18% 10%;
+    --background-paper: 20 12% 12%;
+
+    --foreground: 36 20% 92%;
+    --foreground-muted: 36 12% 65%;
+    --foreground-subtle: 36 8% 50%;
+
+    --card: 20 15% 12%;
+    --card-foreground: 36 20% 92%;
+    --card-hover: 20 18% 15%;
+
+    --primary: 36 65% 55%;
+    --primary-foreground: 20 20% 10%;
+    --primary-muted: 36 30% 25%;
+
+    --secondary: 150 20% 35%;
+    --secondary-foreground: 150 10% 95%;
+    --secondary-muted: 150 15% 20%;
+
+    --accent: 15 50% 60%;
+    --accent-foreground: 15 10% 10%;
+    --accent-muted: 15 30% 20%;
+
+    --muted: 20 15% 18%;
+    --muted-foreground: 36 10% 60%;
+
+    --border: 20 15% 22%;
+    --border-strong: 20 12% 35%;
+
+    --shadow-color: 0 0% 0%;
+    --shadow-book: 0 4px 20px -4px hsl(var(--shadow-color) / 0.4),
+                   0 8px 40px -8px hsl(var(--shadow-color) / 0.3);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply scroll-smooth antialiased;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans;
+    font-feature-settings: "ss01", "ss02", "cv01";
+  }
+
+  /* Typography defaults */
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    @apply font-semibold tracking-tight;
+  }
+
+  h1 { @apply text-4xl md:text-5xl lg:text-6xl; }
+  h2 { @apply text-3xl md:text-4xl; }
+  h3 { @apply text-2xl md:text-3xl; }
+  h4 { @apply text-xl md:text-2xl; }
+
+  /* Selection styling */
+  ::selection {
+    @apply bg-primary/20 text-foreground;
+  }
+}
+
+@layer components {
+  /* === Book Card Styles === */
+  .book-card {
+    @apply relative overflow-hidden rounded-lg bg-card transition-all duration-300;
+    box-shadow: var(--shadow-card);
+    transform: translateY(0) rotateX(0);
+    transform-style: preserve-3d;
+  }
+
+  .book-card:hover {
+    box-shadow: var(--shadow-book-hover);
+    transform: translateY(-8px);
+  }
+
+  .book-card::after {
+    content: '';
+    @apply absolute inset-x-0 bottom-0 h-1 bg-gradient-to-r from-primary/0 via-primary/50 to-primary/0;
+    @apply opacity-0 transition-opacity duration-300;
+  }
+
+  .book-card:hover::after {
+    @apply opacity-100;
+  }
+
+  /* Book cover with page effect */
+  .book-cover {
+    @apply relative overflow-hidden bg-muted;
+    aspect-ratio: 2/3;
+  }
+
+  .book-cover::before {
+    content: '';
+    @apply absolute inset-y-0 right-0 w-[3px] bg-gradient-to-l from-black/10 to-transparent z-10;
+  }
+
+  .book-cover::after {
+    content: '';
+    @apply absolute inset-0 bg-gradient-to-t from-black/20 via-transparent to-white/10;
+    @apply opacity-0 transition-opacity duration-300;
+  }
+
+  .book-card:hover .book-cover::after {
+    @apply opacity-100;
+  }
+
+  /* Book spine effect on hover */
+  .book-spine {
+    @apply absolute left-0 inset-y-0 w-[4px];
+    background: linear-gradient(
+      to right,
+      hsl(var(--primary) / 0.8),
+      hsl(var(--primary) / 0.6)
+    );
+    @apply opacity-0 transition-all duration-300;
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+
+  .book-card:hover .book-spine {
+    @apply opacity-100;
+    transform: scaleX(1);
+  }
+
+  /* === Quality Badges === */
+  .quality-badge {
+    @apply inline-flex items-center justify-center rounded-full px-2.5 py-0.5;
+    @apply text-xs font-semibold tracking-wide;
+    @apply shadow-sm;
+  }
+
+  .quality-badge-aplus {
+    @apply bg-emerald-500 text-white;
+    box-shadow: 0 0 12px hsl(152 60% 40% / 0.4);
+  }
+
+  .quality-badge-a {
+    @apply bg-emerald-400 text-white;
+  }
+
+  .quality-badge-aminus {
+    @apply bg-green-400 text-white;
+  }
+
+  .quality-badge-bplus {
+    @apply bg-sky-400 text-white;
+  }
+
+  .quality-badge-b {
+    @apply bg-sky-300 text-gray-800;
+  }
+
+  .quality-badge-bminus {
+    @apply bg-gray-300 text-gray-700;
+  }
+
+  /* === Category Pills === */
+  .category-pill {
+    @apply inline-flex items-center gap-1.5 rounded-full px-4 py-2;
+    @apply text-sm font-medium transition-all duration-200;
+    @apply border border-border bg-card hover:bg-card-hover;
+    @apply hover:border-primary/30 hover:shadow-sm;
+  }
+
+  .category-pill-active {
+    @apply bg-primary text-primary-foreground border-primary;
+    @apply hover:bg-primary-hover;
+  }
+
+  /* === Shelf Divider === */
+  .shelf-divider {
+    @apply relative my-8;
+  }
+
+  .shelf-divider::before {
+    content: '';
+    @apply absolute inset-x-0 top-1/2 h-px bg-gradient-to-r from-transparent via-border-strong to-transparent;
+  }
+
+  /* === Navigation Active Indicator === */
+  .nav-link {
+    @apply relative px-4 py-2 text-sm font-medium transition-colors;
+    @apply text-foreground-muted hover:text-foreground;
+  }
+
+  .nav-link-active {
+    @apply text-foreground;
+  }
+
+  .nav-link-active::after {
+    content: '';
+    @apply absolute bottom-0 left-4 right-4 h-0.5 bg-primary rounded-full;
+  }
+
+  /* === Skeleton Loading === */
+  .skeleton {
+    @apply animate-pulse bg-muted rounded;
+  }
+
+  .skeleton-text {
+    @apply h-4 skeleton;
+  }
+
+  .skeleton-title {
+    @apply h-6 skeleton;
+  }
+
+  .skeleton-cover {
+    aspect-ratio: 2/3;
+    @apply skeleton;
+  }
+}
+
+@layer utilities {
+  /* Text balance for headings */
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  /* Gradient text */
+  .text-gradient {
+    @apply bg-clip-text text-transparent;
+    @apply bg-gradient-to-r from-primary via-accent to-primary;
+  }
+
+  /* Custom line clamp */
+  .line-clamp-1 { @apply overflow-hidden; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; }
+  .line-clamp-2 { @apply overflow-hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .line-clamp-3 { @apply overflow-hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+  .line-clamp-4 { @apply overflow-hidden; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; }
+
+  /* Stagger animations */
+  .stagger-1 { animation-delay: 50ms; }
+  .stagger-2 { animation-delay: 100ms; }
+  .stagger-3 { animation-delay: 150ms; }
+  .stagger-4 { animation-delay: 200ms; }
+  .stagger-5 { animation-delay: 250ms; }
+  .stagger-6 { animation-delay: 300ms; }
+
+  /* Glass effect */
+  .glass {
+    @apply backdrop-blur-md bg-background/80;
+  }
+
+  /* Hide scrollbar */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  /* Scrollbar styling */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border-strong)) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply bg-border-strong rounded-full;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    @apply bg-foreground-muted;
+  }
+}
+
+/* === Keyframe Animations === */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-down {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes book-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 0 0 hsl(var(--primary) / 0.4); }
+  50% { box-shadow: 0 0 20px 4px hsl(var(--primary) / 0.2); }
+}
+
+.animate-fade-in { animation: fade-in 0.5s ease-out forwards; }
+.animate-fade-up { animation: fade-up 0.6s ease-out forwards; }
+.animate-fade-down { animation: fade-down 0.6s ease-out forwards; }
+.animate-scale-in { animation: scale-in 0.4s ease-out forwards; }
+.animate-slide-in-right { animation: slide-in-right 0.5s ease-out forwards; }
+.animate-book-float { animation: book-float 3s ease-in-out infinite; }
+.animate-shimmer {
+  background: linear-gradient(90deg, transparent, hsl(var(--muted)) 50%, transparent);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+.animate-pulse-glow { animation: pulse-glow 2s ease-in-out infinite; }
+
+/* Initial states for animated elements */
+.animate-on-scroll {
+  opacity: 0;
+  transform: translateY(20px);
+  transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+}
+
+.animate-on-scroll.visible {
+  opacity: 1;
+  transform: translateY(0);
+}

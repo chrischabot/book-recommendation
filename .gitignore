@@ -1,0 +1,54 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Next.js
+.next
+out
+
+# Build
+dist
+build
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Data
+data/openlibrary/*.txt
+data/openlibrary/*.json
+data/openlibrary/*.tsv
+data/goodreads/*.csv
+data/kindle/*
+data/cache/*
+data/uploads/*
+!data/.gitkeep
+
+# Build artifacts
+tsconfig.tsbuildinfo
+
+# Temp files
+unknown.csv
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Testing
+coverage
+.nyc_output
+
+# Misc
+*.tgz
