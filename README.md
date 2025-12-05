@@ -45,7 +45,7 @@ pnpm download:ol
 # Ingest the data (go make tea, this takes a while)
 pnpm ingest:ol
 
-# Import your reading history
+# Import your reading history (see "Getting Your Data" below)
 pnpm import:goodreads    # From Goodreads CSV export
 pnpm import:kindle       # From Amazon data export
 
@@ -60,6 +60,35 @@ pnpm dev
 ```
 
 Visit [http://localhost:3000/recommendations](http://localhost:3000/recommendations) to meet your next favorite book.
+
+## Getting Your Data
+
+### Goodreads Export
+
+1. Log in to [Goodreads](https://www.goodreads.com)
+2. Go to **My Books** → **Import and Export** (or visit [goodreads.com/review/import](https://www.goodreads.com/review/import))
+3. Click **Export Library**
+4. Save the CSV file to `./data/goodreads/export.csv`
+
+The export includes your shelves, ratings, and read dates—everything we need to understand your taste.
+
+### Amazon / Kindle Data
+
+Amazon knows more about your reading habits than you might expect. Here's how to liberate that data:
+
+1. Go to [Amazon's Request Your Data](https://www.amazon.com/hz/privacy-central/data-requests/preview.html) page
+2. Select **Request All Your Data** (or specifically "Digital Content" for just Kindle)
+3. Wait for Amazon's email (usually 1-3 days, though they claim up to 30)
+4. Download and extract the ZIP file
+5. Copy the contents to `./data/kindle/`
+
+The import script looks for these files in your Kindle export:
+- `Retail.OrderHistory.csv` — Purchase history
+- `Digital Items.csv` — Your Kindle library
+- `Kindle.Devices.ReadingSession/` — Reading sessions and progress
+- `Digital.PrimeReading.*/` — Prime Reading borrows
+
+Don't worry if some files are missing—the importer takes what it can get.
 
 ## Environment Variables
 
@@ -79,9 +108,13 @@ REDIS_URL="redis://localhost:6379"  # For response caching
 
 This system respects the commons. It uses:
 
-- **Open Library** — The Internet Archive's open book database
-- **Google Books API** — For metadata enrichment
-- **Your exports** — Goodreads CSV, Amazon "Request Your Data"
+- **[Open Library](https://openlibrary.org)** — The Internet Archive's open book database. We ingest their [bulk data dumps](https://openlibrary.org/developers/dumps) containing works, editions, authors, ratings, and reading logs.
+
+- **[Google Books API](https://developers.google.com/books)** — For enriching metadata (descriptions, ratings, covers) when Open Library comes up short. Free tier is generous.
+
+- **[OpenAI API](https://platform.openai.com)** — Powers the `text-embedding-3-large` model for semantic embeddings. Expect ~$8-12 to embed the full quality corpus.
+
+- **Your exports** — Goodreads CSV and Amazon "Request Your Data" exports. Your reading history, your recommendations.
 
 It does not scrape. Librarians have standards.
 
@@ -113,19 +146,6 @@ pnpm import:kindle       # Import your Kindle data
 pnpm features:embed      # Generate embeddings
 pnpm profile:build       # Build taste profile
 pnpm refresh:all         # Refresh computed features
-```
-
-## Project Structure
-
-```
-app/                    # Next.js pages and API routes
-lib/
-  ├── db/               # Database connection and utilities
-  ├── features/         # Embedding generation, user profiles
-  ├── ingest/           # Data import from various sources
-  └── recs/             # Recommendation engine
-scripts/                # CLI tools for data pipeline
-db/migrations/          # SQL schema migrations
 ```
 
 ## API Endpoints

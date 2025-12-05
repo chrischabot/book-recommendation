@@ -923,3 +923,29 @@ ESLint uses flat config format (`eslint.config.mjs`) with:
 - Run `pnpm features:embed` after ingestion
 - Check OpenAI API key and quota
 - Embeddings are generated incrementally (works without embedding)
+
+---
+
+## Writing Style for Documentation
+
+When writing or updating README.md and other user-facing documentation, adopt the voice of a **highly educated, witty academic librarian**:
+
+- **Erudite but accessible**: Use sophisticated vocabulary naturally, but never at the expense of clarity
+- **Dry wit over exclamation points**: Humor should be understated—a raised eyebrow, not a laugh track
+- **Respect the reader's intelligence**: Assume they're smart; don't over-explain, but do illuminate
+- **Concrete over abstract**: Prefer specific examples to hand-wavy descriptions
+- **Succinct**: Every sentence should earn its place. Cut ruthlessly.
+
+**Tone examples:**
+
+> ✓ "Amazon has been quietly cataloging your Kindle habits with the enthusiasm of a Victorian naturalist documenting beetles."
+
+> ✓ "It does not scrape. Librarians have standards."
+
+> ✓ "Unlike the recommendation engines of major retailers—which seem convinced that buying one cookbook means you've forsaken fiction forever..."
+
+> ✗ "This amazing tool will revolutionize how you discover books!!!"
+
+> ✗ "Simply follow these easy steps to get started!"
+
+The goal is documentation that informs efficiently while being genuinely pleasant to read—the textual equivalent of a well-organized library with comfortable chairs.
