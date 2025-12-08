@@ -24,6 +24,7 @@ const { values } = parseArgs({
     batch: { type: "string", default: "50" },
     limit: { type: "string" },
   },
+  allowPositionals: true,
 });
 
 // Rate limiters for external APIs
@@ -46,10 +47,12 @@ interface WorkForEnrichment {
 
 /**
  * Get works that have embeddings but no description
+ * Prioritizes works most similar to user's reading history (most likely to be recommended)
  */
 async function getWorksNeedingDescriptions(
   limit: number
 ): Promise<WorkForEnrichment[]> {
+  // First, try to prioritize by similarity to user's anchor books
   const { rows } = await query<{
     id: number;
     title: string;
@@ -57,6 +60,9 @@ async function getWorksNeedingDescriptions(
     author_name: string | null;
   }>(
     `
+    WITH user_profile AS (
+      SELECT profile_vec FROM "UserProfile" WHERE user_id = 'me' LIMIT 1
+    )
     SELECT
       w.id,
       w.title,
@@ -70,8 +76,12 @@ async function getWorksNeedingDescriptions(
       ) AS author_name
     FROM "Work" w
     WHERE w.embedding IS NOT NULL
-      AND w.description IS NULL
-    ORDER BY w.id
+      AND (w.description IS NULL OR w.description = '')
+      AND NOT EXISTS (SELECT 1 FROM "UserEvent" ue WHERE ue.work_id = w.id AND ue.user_id = 'me')
+    ORDER BY
+      CASE WHEN EXISTS (SELECT 1 FROM user_profile)
+           THEN w.embedding <=> (SELECT profile_vec FROM user_profile)
+           ELSE w.id::float END
     LIMIT $1
     `,
     [limit]
@@ -257,7 +267,7 @@ async function main() {
           // Mark as processed (set empty string) so we don't retry forever
           // Use a sentinel value to indicate we tried but found nothing
           await client.query(
-            `UPDATE "Work" SET description = '', updated_at = NOW() WHERE id = $2`,
+            `UPDATE "Work" SET description = '', updated_at = NOW() WHERE id = $1`,
             [work.id]
           );
           failed++;
