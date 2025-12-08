@@ -61,32 +61,26 @@ const DEFAULT_WEIGHTS: RerankWeights = {
 };
 
 /**
- * Get work metadata for candidates
+ * Get work metadata for candidates (without embeddings for speed)
  */
 async function getWorkMetadata(
   workIds: number[]
 ): Promise<Map<number, WorkMetadata>> {
   if (workIds.length === 0) return new Map();
 
+  // Use pre-aggregated view if available, otherwise fall back to join
+  // Note: NOT fetching embeddings here - they're huge and only needed for MMR
   const { rows } = await query<{
     id: number;
     title: string;
     first_publish_year: number | null;
-    embedding: string | null;
-    authors: string;
+    author_names: string | null;
   }>(
     `
-    SELECT
-      w.id,
-      w.title,
-      w.first_publish_year,
-      w.embedding::text,
-      COALESCE(string_agg(a.name, ', '), '') AS authors
+    SELECT w.id, w.title, w.first_publish_year, waa.author_names
     FROM "Work" w
-    LEFT JOIN "WorkAuthor" wa ON w.id = wa.work_id
-    LEFT JOIN "Author" a ON wa.author_id = a.id
+    LEFT JOIN work_authors_agg waa ON w.id = waa.work_id
     WHERE w.id = ANY($1)
-    GROUP BY w.id
     `,
     [workIds]
   );
@@ -96,12 +90,32 @@ async function getWorkMetadata(
     result.set(row.id, {
       id: row.id,
       title: row.title,
-      authors: row.authors ? row.authors.split(", ").filter(Boolean) : [],
+      authors: row.author_names ? row.author_names.split(", ").filter(Boolean) : [],
       year: row.first_publish_year,
-      embedding: row.embedding ? parseVector(row.embedding) : null,
+      embedding: null, // Fetched on-demand during MMR
     });
   }
 
+  return result;
+}
+
+/**
+ * Fetch embeddings for a batch of work IDs (only when needed for MMR)
+ */
+async function getEmbeddingsBatch(
+  workIds: number[]
+): Promise<Map<number, number[]>> {
+  if (workIds.length === 0) return new Map();
+
+  const { rows } = await query<{ id: number; embedding: string }>(
+    `SELECT id, embedding::text FROM "Work" WHERE id = ANY($1) AND embedding IS NOT NULL`,
+    [workIds]
+  );
+
+  const result = new Map<number, number[]>();
+  for (const row of rows) {
+    result.set(row.id, parseVector(row.embedding));
+  }
   return result;
 }
 
@@ -250,7 +264,7 @@ export async function rerankCandidates(
   const weights = { ...DEFAULT_WEIGHTS, ...customWeights };
   const workIds = candidates.map((c) => c.workId);
 
-  // Fetch all required data
+  // Fetch metadata without embeddings (fast)
   const [metadata, qualities, graphFeatures, engagements] = await Promise.all([
     getWorkMetadata(workIds),
     getWorkQualities(workIds),
@@ -274,7 +288,6 @@ export async function rerankCandidates(
     const graphScore = graph?.proxScore ?? 0;
     const engagementScore = calculateEngagementScore(engagement);
 
-    // Initial score (without diversity)
     const baseScore =
       weights.relevance * relevanceScore +
       weights.quality * qualityScore +
@@ -291,24 +304,33 @@ export async function rerankCandidates(
       engagementScore,
       engagement,
       baseScore,
-      embedding: meta?.embedding ?? null,
+      embedding: null as number[] | null, // Loaded lazily for MMR subset
     };
   });
 
-  // Sort by base score initially
+  // Sort by base score and take top candidates for MMR (limit expensive embedding fetches)
   scoredCandidates.sort((a, b) => b.baseScore - a.baseScore);
+  const mmrCandidateCount = Math.min(scoredCandidates.length, limit * 2); // 2x limit for diversity selection
+  const mmrCandidates = scoredCandidates.slice(0, mmrCandidateCount);
 
-  // MMR selection for diversity
+  // Fetch embeddings only for MMR candidates (much smaller set)
+  const mmrWorkIds = mmrCandidates.map((c) => c.workId);
+  const embeddings = await getEmbeddingsBatch(mmrWorkIds);
+  for (const c of mmrCandidates) {
+    c.embedding = embeddings.get(c.workId) ?? null;
+  }
+
+  // MMR selection for diversity (using reduced candidate set)
   const selected: RankedRecommendation[] = [];
   const selectedEmbeddings: number[][] = [];
   const selectedAuthors = new Set<string>();
-  const remaining = new Set(scoredCandidates.map((c) => c.workId));
+  const remaining = new Set(mmrCandidates.map((c) => c.workId));
 
   while (selected.length < limit && remaining.size > 0) {
-    let bestCandidate: (typeof scoredCandidates)[0] | null = null;
+    let bestCandidate: (typeof mmrCandidates)[0] | null = null;
     let bestMmrScore = -Infinity;
 
-    for (const candidate of scoredCandidates) {
+    for (const candidate of mmrCandidates) {
       if (!remaining.has(candidate.workId)) continue;
 
       // Calculate novelty/diversity component

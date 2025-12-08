@@ -63,43 +63,79 @@ export async function generateGeneralCandidates(
     return [];
   }
 
-  // Get exclusions
-  const readWorkIds = await getUserReadWorkIds(userId);
-  const blocks = await getUserBlocks(userId);
+  // Get exclusions (parallel)
+  const [readWorkIds, blocks] = await Promise.all([
+    getUserReadWorkIds(userId),
+    getUserBlocks(userId),
+  ]);
   const excludeWorkIds = [...readWorkIds, ...blocks.workIds];
+  const excludeSet = new Set(excludeWorkIds);
 
-  // Vector-based candidates from user profile
-  const vectorCandidates = await knnFromVector(
-    profile.profileVec,
-    limit,
-    excludeWorkIds
-  );
+  // Prepare anchor data for parallel fetches
+  const anchorWorkIds = profile.anchors.slice(0, 10).map((a) => a.workId);
+  const graphAnchors = profile.anchors.slice(0, 5);
+  const communityAnchors = profile.anchors.slice(0, 3);
 
-  // Graph-based candidates from anchor books
+  // Run all candidate generation in parallel
+  const [
+    vectorCandidates,
+    graphNeighborResults,
+    communityResults,
+    anchorOlRows,
+  ] = await Promise.all([
+    // Vector-based candidates from user profile
+    knnFromVector(profile.profileVec, limit, excludeWorkIds),
+    // Graph-based candidates (all anchors in parallel)
+    Promise.all(graphAnchors.map((anchor) =>
+      getGraphNeighbors(anchor.workId, 2).then((neighbors) => ({
+        anchor,
+        neighbors,
+      }))
+    )),
+    // Community-based candidates (all anchors in parallel)
+    Promise.all(communityAnchors.map((anchor) =>
+      getCommunityCandidates(anchor.workId, 50).then((works) => ({
+        anchor,
+        works,
+      }))
+    )),
+    // Look up OL work keys for collaborative filtering
+    query<{ id: number; ol_work_key: string }>(
+      `SELECT id, ol_work_key FROM "Work" WHERE id = ANY($1) AND ol_work_key IS NOT NULL`,
+      [anchorWorkIds]
+    ).then((r) => r.rows),
+  ]);
+
+  // Process graph neighbors
   const graphCandidates: { id: number; sim: number }[] = [];
-  for (const anchor of profile.anchors.slice(0, 5)) {
-    const neighbors = await getGraphNeighbors(anchor.workId, 2);
+  for (const { anchor, neighbors } of graphNeighborResults) {
     for (const neighborId of neighbors) {
-      if (!excludeWorkIds.includes(neighborId)) {
+      if (!excludeSet.has(neighborId)) {
         graphCandidates.push({
           id: neighborId,
-          sim: 0.5 * anchor.weight, // Scale by anchor weight
+          sim: 0.5 * anchor.weight,
+        });
+      }
+    }
+  }
+
+  // Process community candidates
+  const communityCandidates: { id: number; sim: number }[] = [];
+  for (const { anchor, works } of communityResults) {
+    for (const cw of works) {
+      if (!excludeSet.has(cw.workId)) {
+        communityCandidates.push({
+          id: cw.workId,
+          sim: 0.3 * anchor.weight,
         });
       }
     }
   }
 
   // Collaborative filtering from anchor books (Jaccard-based)
-  // Look up OL work keys for anchors
-  const anchorWorkIds = profile.anchors.slice(0, 10).map((a) => a.workId);
-  const { rows: anchorOlRows } = await query<{ id: number; ol_work_key: string }>(
-    `SELECT id, ol_work_key FROM "Work" WHERE id = ANY($1) AND ol_work_key IS NOT NULL`,
-    [anchorWorkIds]
-  );
-  const workIdToOlKey = new Map(anchorOlRows.map((r) => [r.id, r.ol_work_key]));
   const anchorOlKeys = anchorOlRows.map((r) => r.ol_work_key);
-
   const collaborativeCandidates: { id: number; sim: number }[] = [];
+
   if (anchorOlKeys.length > 0) {
     const similarWorksBatch = await getSimilarWorksBatch(anchorOlKeys, 30);
 
@@ -119,13 +155,11 @@ export async function generateGeneralCandidates(
       const olKeyToId = new Map(workRows.map((r) => [r.ol_work_key, r.id]));
 
       for (const [anchorKey, results] of similarWorksBatch) {
-        // Find anchor weight by looking up the work ID for this OL key
         const anchorWorkId = anchorOlRows.find((r) => r.ol_work_key === anchorKey)?.id;
         const anchorWeight = profile.anchors.find((a) => a.workId === anchorWorkId)?.weight ?? 1;
         for (const r of results) {
           const workId = olKeyToId.get(r.olWorkKey);
-          if (workId && !excludeWorkIds.includes(workId)) {
-            // Score based on Jaccard similarity weighted by anchor importance
+          if (workId && !excludeSet.has(workId)) {
             collaborativeCandidates.push({
               id: workId,
               sim: r.jaccard * anchorWeight * 0.8,
@@ -136,21 +170,7 @@ export async function generateGeneralCandidates(
     }
   }
 
-  // Community-based candidates from anchor books
-  const communityCandidates: { id: number; sim: number }[] = [];
-  for (const anchor of profile.anchors.slice(0, 3)) {
-    const communityWorks = await getCommunityCandidates(anchor.workId, 50);
-    for (const cw of communityWorks) {
-      if (!excludeWorkIds.includes(cw.workId)) {
-        communityCandidates.push({
-          id: cw.workId,
-          sim: 0.3 * anchor.weight, // Lower weight for community matches
-        });
-      }
-    }
-  }
-
-  // Merge and deduplicate
+  // Merge and deduplicate (all sources already filtered by excludeSet)
   const candidateMap = new Map<number, Candidate>();
 
   for (const vc of vectorCandidates) {
@@ -164,7 +184,6 @@ export async function generateGeneralCandidates(
   for (const gc of graphCandidates) {
     const existing = candidateMap.get(gc.id);
     if (existing) {
-      // Boost score if found by both methods
       existing.score = Math.min(1.0, existing.score + gc.sim * 0.2);
     } else {
       candidateMap.set(gc.id, {
@@ -175,7 +194,6 @@ export async function generateGeneralCandidates(
     }
   }
 
-  // Collaborative filtering candidates (Jaccard-based)
   for (const cc of collaborativeCandidates) {
     const existing = candidateMap.get(cc.id);
     if (existing) {
@@ -189,7 +207,6 @@ export async function generateGeneralCandidates(
     }
   }
 
-  // Community candidates
   for (const cm of communityCandidates) {
     const existing = candidateMap.get(cm.id);
     if (existing) {
@@ -198,20 +215,19 @@ export async function generateGeneralCandidates(
       candidateMap.set(cm.id, {
         workId: cm.id,
         score: cm.sim,
-        source: "graph", // Treat community as graph source
+        source: "graph",
       });
     }
   }
 
-  // Apply author blocks
+  // Apply author blocks (if any)
   if (blocks.authorIds.length > 0) {
     const { rows: blockedWorks } = await query<{ work_id: number }>(
       `SELECT DISTINCT work_id FROM "WorkAuthor" WHERE author_id = ANY($1)`,
       [blocks.authorIds]
     );
-    const blockedWorkIds = new Set(blockedWorks.map((w) => w.work_id));
-    for (const workId of blockedWorkIds) {
-      candidateMap.delete(workId);
+    for (const { work_id } of blockedWorks) {
+      candidateMap.delete(work_id);
     }
   }
 

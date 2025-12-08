@@ -78,17 +78,26 @@ const features = [
 ];
 
 async function getHomeRecommendations(): Promise<ExplainedRecommendation[]> {
+  // Import directly to avoid HTTP self-fetch overhead
   try {
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
-    const res = await fetch(
-      `${baseUrl}/api/recommendations/general?page=1&page_size=12&user_id=me`,
-      { cache: "no-store" }
-    );
+    const { generateGeneralCandidates } = await import("@/lib/recs/candidates");
+    const { rerankCandidates } = await import("@/lib/recs/rerank");
+    const { explainRecommendations } = await import("@/lib/recs/explain");
 
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data.recommendations ?? [];
-  } catch {
+    const candidates = await generateGeneralCandidates({
+      userId: "me",
+      limit: 200, // Smaller limit for home page preview
+      useCache: true,
+    });
+
+    if (candidates.length === 0) return [];
+
+    const ranked = await rerankCandidates(candidates, { limit: 24, userId: "me" });
+    const explained = await explainRecommendations("me", ranked.slice(0, 12), { fast: true });
+
+    return explained;
+  } catch (error) {
+    console.error("Home recommendations error:", error);
     return [];
   }
 }
