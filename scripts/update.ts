@@ -22,8 +22,11 @@ import { parseArgs } from "util";
 import { existsSync } from "fs";
 import { spawn } from "child_process";
 import { getEnv } from "@/lib/config/env";
+import { runDataQualityCheck } from "@/lib/util/dataQuality";
+import { closePool } from "@/lib/db/pool";
 
 const { values } = parseArgs({
+  allowPositionals: true,
   options: {
     user: { type: "string", default: "me" },
     // Skip flags
@@ -38,6 +41,7 @@ const { values } = parseArgs({
     "skip-kindle-enrich": { type: "boolean", default: false },
     "skip-kindle-dedupe": { type: "boolean", default: false },
     "skip-kindle-fixunknown": { type: "boolean", default: false },
+    "skip-cross-source-dedupe": { type: "boolean", default: false },
     "skip-refresh-views": { type: "boolean", default: false },
     "skip-features": { type: "boolean", default: false },
     // Quick mode: only refresh features (skip download, ingest, enrich)
@@ -54,10 +58,11 @@ interface StepResult {
 
 function runScript(command: string, args: string[] = []): Promise<void> {
   return new Promise((resolve, reject) => {
-    console.log(`  Running: pnpm ${command} ${args.join(" ")}`);
-    const child = spawn("pnpm", [command, ...args], {
+    // Filter out bare "--" separators that were used for pnpm arg passing
+    const cleanArgs = args.filter((arg) => arg !== "--");
+    console.log(`  Running: pnpm ${command} ${cleanArgs.join(" ")}`);
+    const child = spawn("pnpm", [command, ...cleanArgs], {
       stdio: "inherit",
-      shell: true,
     });
 
     child.on("close", (code) => {
@@ -110,6 +115,7 @@ async function main() {
   const skipKindleReenrich = values["skip-kindle-reenrich"] || values["skip-kindle-enrich"];
   const skipKindleDedupe = values["skip-kindle-dedupe"];
   const skipKindleFixUnknown = values["skip-kindle-fixunknown"];
+  const skipCrossSourceDedupe = values["skip-cross-source-dedupe"];
   const skipRefreshViews = values["skip-refresh-views"];
   const skipFeatures = values["skip-features"];
 
@@ -132,12 +138,30 @@ async function main() {
     )
   );
 
+  // Step 1b: Backup embeddings before OL ingest (they get wiped by fast mode)
+  results.push(
+    await runStep(
+      "1b. Backup embeddings",
+      () => runScript("embeddings:backup"),
+      skipIngest // Skip backup if we're skipping ingest
+    )
+  );
+
   // Step 2: Ingest Open Library data
   results.push(
     await runStep(
       "2. Ingest Open Library data",
       () => runScript("ingest:ol"),
       skipIngest
+    )
+  );
+
+  // Step 2b: Restore embeddings after OL ingest
+  results.push(
+    await runStep(
+      "2b. Restore embeddings",
+      () => runScript("embeddings:restore"),
+      skipIngest // Skip restore if we skipped ingest
     )
   );
 
@@ -218,10 +242,19 @@ async function main() {
     )
   );
 
-  // Step 5f: Refresh materialized views and compute quality scores
+  // Step 5f: Cross-source deduplication (merge Amazon stubs into OL canonical)
   results.push(
     await runStep(
-      "5f. Refresh views & quality scores",
+      "5f. Cross-source deduplication",
+      () => runScript("dedupe:cross-source"),
+      skipCrossSourceDedupe
+    )
+  );
+
+  // Step 5g: Refresh materialized views and compute quality scores
+  results.push(
+    await runStep(
+      "5g. Refresh views & quality scores",
       () => runScript("refresh:views"),
       skipRefreshViews
     )
@@ -285,6 +318,16 @@ async function main() {
     const durationStr = result.duration ? ` (${(result.duration / 1000).toFixed(0)}s)` : "";
     console.log(`  [${icon}] ${result.step}${durationStr}`);
   }
+
+  // Run data quality check
+  try {
+    await runDataQualityCheck(userId);
+  } catch (error) {
+    console.error("Data quality check failed:", error);
+  }
+
+  // Clean up database connections
+  await closePool();
 
   if (failed > 0) {
     console.log("");

@@ -22,8 +22,27 @@ import { logger } from "@/lib/util/logger";
 
 const { values } = parseArgs({
   options: {
-    batch: { type: "string", default: "50" },
+    batch: { type: "string", default: "100" },
+    parallel: { type: "string", default: "4" },
   },
+});
+
+// Cleanup on exit
+async function cleanup() {
+  await closePool();
+}
+
+// Handle process signals
+process.on("SIGINT", async () => {
+  logger.info("Received SIGINT, cleaning up...");
+  await cleanup();
+  process.exit(0);
+});
+
+process.on("SIGTERM", async () => {
+  logger.info("Received SIGTERM, cleaning up...");
+  await cleanup();
+  process.exit(0);
 });
 
 async function main() {
@@ -34,19 +53,35 @@ async function main() {
     process.exit(1);
   }
 
-  const batchSize = parseInt(values.batch!, 10);
+  const batchSize = parseInt(values.batch ?? "100", 10);
+  const parallelBatches = parseInt(values.parallel ?? "4", 10);
 
-  logger.info("Starting embedding generation for quality works", { batchSize });
+  if (isNaN(batchSize) || batchSize < 1) {
+    logger.error("batch must be a positive integer");
+    process.exit(1);
+  }
+  if (isNaN(parallelBatches) || parallelBatches < 1) {
+    logger.error("parallel must be a positive integer");
+    process.exit(1);
+  }
+
+  logger.info("Starting embedding generation for quality works", {
+    batchSize,
+    parallelBatches,
+    effectiveWorkRate: `${batchSize * parallelBatches} works per round`,
+  });
 
   const result = await buildWorkEmbeddings({
     batchSize,
+    parallelBatches,
   });
 
   logger.info("Embedding generation complete", result);
-  await closePool();
 }
 
-main().catch((error) => {
-  logger.error("Embedding generation failed", { error: String(error) });
-  process.exit(1);
-});
+main()
+  .catch((error) => {
+    logger.error("Embedding generation failed", { error: String(error) });
+    process.exit(1);
+  })
+  .finally(cleanup);

@@ -287,9 +287,8 @@ export async function resolveByTitleAuthor(input: ResolveInput): Promise<Resolve
 /**
  * Find title match in local database
  *
- * NOTE: Fuzzy/trigram matching is disabled until we add a GIN trigram index
- * on Work.title. Without the index, similarity queries do full table scans
- * on 18M+ rows, taking 6-72 seconds per lookup.
+ * Uses GIN trigram index (migration 013) for efficient fuzzy matching.
+ * Falls back to exact match if similarity query returns no results.
  */
 async function findLocalTitleMatch(
   title: string,
@@ -297,59 +296,65 @@ async function findLocalTitleMatch(
 ): Promise<{ workId: number; editionId: number; confidence: number } | null> {
   const normalizedTitle = title.toLowerCase().trim();
 
-  // Try exact title match only (fuzzy matching disabled - see note above)
+  // Try fuzzy title match using trigram similarity (requires GIN index from migration 013)
   const { rows } = await query<{
     work_id: number;
     edition_id: number;
     title: string;
     author_name: string | null;
+    title_sim: number;
   }>(
-    `SELECT w.id as work_id, e.id as edition_id, w.title, a.name as author_name
+    `SELECT w.id as work_id, e.id as edition_id, w.title, a.name as author_name,
+            similarity(LOWER(w.title), $1) as title_sim
      FROM "Work" w
      LEFT JOIN "Edition" e ON e.work_id = w.id
      LEFT JOIN "WorkAuthor" wa ON wa.work_id = w.id
      LEFT JOIN "Author" a ON a.id = wa.author_id
-     WHERE LOWER(w.title) = $1
+     WHERE LOWER(w.title) % $1
+     ORDER BY title_sim DESC
      LIMIT 10`,
     [normalizedTitle]
   );
 
-  // TODO: Re-enable fuzzy matching after adding GIN trigram index:
-  // CREATE INDEX CONCURRENTLY work_title_trgm_idx ON "Work" USING gin (LOWER(title) gin_trgm_ops);
-
   if (rows.length === 0) return null;
 
-  // Exact title match found
-  if (rows.length === 1) {
+  // Use trigram similarity score to determine confidence
+  const bestMatch = rows[0];
+  const titleSimilarity = bestMatch.title_sim ?? 0;
+
+  // High similarity single match
+  if (rows.length === 1 && titleSimilarity >= 0.8) {
     return {
-      workId: rows[0].work_id,
-      editionId: rows[0].edition_id,
-      confidence: 0.9,
+      workId: bestMatch.work_id,
+      editionId: bestMatch.edition_id,
+      confidence: Math.min(0.95, 0.7 + titleSimilarity * 0.3), // 0.7-0.97 based on similarity
     };
   }
 
-  // Multiple matches - verify by author
+  // Multiple matches - verify by author for disambiguation
   if (author) {
     const normalizedAuthor = author.toLowerCase().trim();
     for (const row of rows) {
       if (row.author_name) {
         const authorSim = stringSimilarity(normalizedAuthor, row.author_name.toLowerCase());
         if (authorSim >= 0.7) {
+          // Both title and author match well
+          const combinedConfidence = Math.min(0.95, 0.7 + (row.title_sim ?? 0.5) * 0.15 + authorSim * 0.15);
           return {
             workId: row.work_id,
             editionId: row.edition_id,
-            confidence: 0.95,
+            confidence: combinedConfidence,
           };
         }
       }
     }
   }
 
-  // Return first match with moderate confidence
+  // Return best match with confidence based on title similarity
   return {
-    workId: rows[0].work_id,
-    editionId: rows[0].edition_id,
-    confidence: 0.75,
+    workId: bestMatch.work_id,
+    editionId: bestMatch.edition_id,
+    confidence: Math.min(0.8, 0.5 + titleSimilarity * 0.35),
   };
 }
 

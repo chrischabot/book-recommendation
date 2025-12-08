@@ -1,20 +1,49 @@
-import { NextRequest, NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 import { generateByCategoryCandidates } from "@/lib/recs/candidates";
 import { rerankCandidates } from "@/lib/recs/rerank";
 import { explainRecommendations } from "@/lib/recs/explain";
 import { getCategoryConstraints, getCategorySlugs } from "@/lib/config/categories";
 import { logger } from "@/lib/util/logger";
+import { isDevelopment } from "@/lib/config/env";
+
+/**
+ * Parse and validate a positive integer parameter
+ */
+function parsePositiveInt(
+  value: string | null,
+  defaultValue: number,
+  max?: number
+): number | null {
+  if (!value) return defaultValue;
+  const parsed = parseInt(value, 10);
+  if (isNaN(parsed) || parsed < 1) return null;
+  return max ? Math.min(parsed, max) : parsed;
+}
 
 export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
     const userId = searchParams.get("user_id") ?? "me";
     const slug = searchParams.get("slug");
-    const page = parseInt(searchParams.get("page") ?? "1", 10);
-    const pageSize = Math.min(
-      parseInt(searchParams.get("page_size") ?? "24", 10),
-      100
-    );
+
+    // Validate numeric parameters
+    const page = parsePositiveInt(searchParams.get("page"), 1);
+    const pageSize = parsePositiveInt(searchParams.get("page_size"), 24, 100);
+
+    if (page === null) {
+      return NextResponse.json(
+        { error: "page must be a positive integer" },
+        { status: 400 }
+      );
+    }
+    if (pageSize === null) {
+      return NextResponse.json(
+        { error: "page_size must be a positive integer" },
+        { status: 400 }
+      );
+    }
+
     const includeExplanations = searchParams.get("explain") !== "false";
     const fastMode = searchParams.get("fast") !== "false"; // Fast by default
 
@@ -90,10 +119,23 @@ export async function GET(request: NextRequest) {
       totalPages,
     });
   } catch (error) {
-    logger.error("By-category recommendations error", { error: String(error) });
-    return NextResponse.json(
-      { error: "Failed to generate recommendations" },
-      { status: 500 }
-    );
+    const errorMessage = String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+
+    logger.error("By-category recommendations error", {
+      error: errorMessage,
+      stack: errorStack,
+    });
+
+    // Include error details in development for easier debugging
+    const responseBody = isDevelopment()
+      ? {
+          error: "Failed to generate recommendations",
+          details: errorMessage,
+          stack: errorStack,
+        }
+      : { error: "Failed to generate recommendations" };
+
+    return NextResponse.json(responseBody, { status: 500 });
   }
 }

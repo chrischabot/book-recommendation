@@ -26,6 +26,7 @@ import { BookGridSkeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Badge, QualityBadge } from "@/components/ui/badge";
 import { StarRating } from "@/components/ui/star-rating";
+import { FavoriteButton } from "@/components/favorite-button";
 import { cn, formatCount, formatHours } from "@/lib/utils";
 import { MarkdownDescription } from "@/components/ui/markdown-description";
 import type { ExplainedRecommendation } from "@/lib/recs/explain";
@@ -335,7 +336,7 @@ async function getSimilarBooks(
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
   try {
     const res = await fetch(
-      `${baseUrl}/api/recommendations/by-book?work_id=${workId}&user_id=me&k=12`,
+      `${baseUrl}/api/recommendations/by-book?work_id=${workId}&user_id=me&k=12&explain=false`,
       { cache: "no-store" }
     );
 
@@ -616,8 +617,9 @@ export default async function BookPage(props: {
                 </div>
               )}
 
-              {/* External links */}
+              {/* Actions and External links */}
               <div className="mt-8 flex flex-wrap gap-3">
+                <FavoriteButton workId={work.id} />
                 {work.olWorkKey && (
                   <Button asChild variant="outline" size="sm">
                     <a

@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { useState, useEffect } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   BookOpen,
@@ -11,6 +11,7 @@ import {
   Menu,
   X,
   ChevronDown,
+  Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -39,9 +40,43 @@ const categoryQuickLinks = [
 
 export function Header() {
   const pathname = usePathname();
+  const router = useRouter();
   const [isScrolled, setIsScrolled] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isCategoriesOpen, setIsCategoriesOpen] = useState(false);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Handle search submission
+  const handleSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (searchQuery.trim().length >= 2) {
+      router.push(`/search?q=${encodeURIComponent(searchQuery.trim())}`);
+      setIsSearchOpen(false);
+      setSearchQuery("");
+    }
+  };
+
+  // Focus input when search opens
+  useEffect(() => {
+    if (isSearchOpen && searchInputRef.current) {
+      searchInputRef.current.focus();
+    }
+  }, [isSearchOpen]);
+
+  // Close search on escape
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setIsSearchOpen(false);
+      }
+    };
+    if (isSearchOpen) {
+      document.addEventListener("keydown", handleEscape);
+      return () => document.removeEventListener("keydown", handleEscape);
+    }
+  }, [isSearchOpen]);
 
   useEffect(() => {
     const handleScroll = () => {
@@ -52,10 +87,12 @@ export function Header() {
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
-  // Close mobile menu on route change
+  // Close menus on route change
   useEffect(() => {
     setIsMobileMenuOpen(false);
     setIsCategoriesOpen(false);
+    setIsSearchOpen(false);
+    setSearchQuery("");
   }, [pathname]);
 
   return (
@@ -197,8 +234,22 @@ export function Header() {
               })}
             </div>
 
-            {/* CTA Button */}
-            <div className="hidden md:block">
+            {/* Search Button */}
+            <div className="hidden md:flex items-center gap-2">
+              <button
+                onClick={() => setIsSearchOpen(!isSearchOpen)}
+                className={cn(
+                  "flex items-center gap-2 px-3 py-2 rounded-lg",
+                  "text-sm font-medium transition-all duration-200",
+                  "text-foreground-muted hover:text-foreground hover:bg-muted/50"
+                )}
+                aria-label="Search books"
+              >
+                <Search className="h-4 w-4" />
+                <span className="hidden lg:inline">Search</span>
+              </button>
+
+              {/* CTA Button */}
               <Button asChild>
                 <Link href="/recommendations">
                   Get Started
@@ -231,6 +282,21 @@ export function Header() {
               className="md:hidden border-t border-border bg-card overflow-hidden"
             >
               <div className="px-4 py-4 space-y-2">
+                {/* Search link for mobile */}
+                <Link
+                  href="/search"
+                  className={cn(
+                    "flex items-center gap-3 px-4 py-3 rounded-lg",
+                    "text-base font-medium transition-colors",
+                    pathname === "/search"
+                      ? "bg-primary/10 text-primary"
+                      : "text-foreground-muted hover:bg-muted hover:text-foreground"
+                  )}
+                >
+                  <Search className="h-5 w-5" />
+                  Search
+                </Link>
+
                 {navLinks.map((link) => {
                   const Icon = link.icon;
                   const isActive = pathname === link.href;
@@ -286,6 +352,63 @@ export function Header() {
 
       {/* Spacer for fixed header */}
       <div className="h-16" />
+
+      {/* Search Overlay */}
+      <AnimatePresence>
+        {isSearchOpen && (
+          <>
+            {/* Backdrop */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm"
+              onClick={() => setIsSearchOpen(false)}
+            />
+            {/* Search Modal */}
+            <motion.div
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              transition={{ duration: 0.2 }}
+              className="fixed top-20 inset-x-4 z-50 mx-auto max-w-2xl"
+            >
+              <form
+                onSubmit={handleSearchSubmit}
+                className={cn(
+                  "relative rounded-xl overflow-hidden",
+                  "bg-card border border-border shadow-xl"
+                )}
+              >
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-foreground-muted" />
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search for books or authors..."
+                  className={cn(
+                    "w-full h-14 pl-12 pr-24 bg-transparent",
+                    "text-foreground placeholder:text-foreground-muted",
+                    "focus:outline-none"
+                  )}
+                />
+                <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                  <kbd className="hidden sm:inline-block px-2 py-1 text-xs font-mono text-foreground-muted bg-muted rounded">
+                    ESC
+                  </kbd>
+                  <Button type="submit" size="sm" disabled={searchQuery.trim().length < 2}>
+                    Search
+                  </Button>
+                </div>
+              </form>
+              <p className="text-center text-sm text-foreground-muted mt-3">
+                Press Enter to search or ESC to close
+              </p>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
 
       {/* Click outside to close dropdown */}
       {isCategoriesOpen && (

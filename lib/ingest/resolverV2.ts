@@ -20,6 +20,7 @@ import type {
   ResolutionPath,
   ResolverCacheEntry,
   ResolverLogEntry,
+  WorkSource,
 } from "./resolverV2/types";
 import {
   resolveByIsbn,
@@ -79,17 +80,26 @@ async function checkCache(cacheKey: string): Promise<ResolverCacheEntry | null> 
 
   if (!rows[0]) return null;
 
+  // Validate source is a known WorkSource value
+  const validSources: WorkSource[] = ["openlibrary", "googlebooks", "amazon", "royalroad", "goodreads", "manual"];
+  const rawSource = rows[0].source;
+  const source: WorkSource = validSources.includes(rawSource as WorkSource)
+    ? (rawSource as WorkSource)
+    : "manual";
+
   return {
     workId: rows[0].work_id,
     editionId: rows[0].edition_id,
     confidence: parseFloat(rows[0].confidence),
     path: rows[0].path || "manual",
-    source: (rows[0].source as ResolverCacheEntry["source"]) || "manual",
+    source,
   };
 }
 
 /**
- * Store resolution in cache
+ * Store resolution in cache with upsert semantics
+ * Uses ON CONFLICT to handle race conditions where two concurrent requests
+ * attempt to cache the same key
  */
 async function storeCache(
   cacheKey: string,
@@ -104,6 +114,41 @@ async function storeCache(
        expires_at = NOW() + INTERVAL '90 days'`,
     [cacheKey, result.workId, result.confidence]
   );
+}
+
+/**
+ * Try to acquire an advisory lock for a cache key to prevent duplicate resolution
+ * Returns true if lock acquired, false if another process is already resolving
+ */
+async function tryAcquireResolutionLock(cacheKey: string): Promise<boolean> {
+  // Use PostgreSQL advisory lock with hash of cache key
+  const lockKey = Math.abs(hashCode(cacheKey));
+  const { rows } = await query<{ acquired: boolean }>(
+    `SELECT pg_try_advisory_lock($1) as acquired`,
+    [lockKey]
+  );
+  return rows[0]?.acquired ?? false;
+}
+
+/**
+ * Release advisory lock for a cache key
+ */
+async function releaseResolutionLock(cacheKey: string): Promise<void> {
+  const lockKey = Math.abs(hashCode(cacheKey));
+  await query(`SELECT pg_advisory_unlock($1)`, [lockKey]);
+}
+
+/**
+ * Simple hash code function for strings
+ */
+function hashCode(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return hash;
 }
 
 /**
@@ -193,6 +238,7 @@ function formatPath(path: ResolutionPath): string {
 /**
  * Main resolution function
  * Routes to appropriate path based on available identifiers
+ * Uses advisory locking to prevent duplicate work creation from concurrent requests
  */
 export async function resolveWork(input: ResolveInput): Promise<ResolveResult> {
   // Validate input has at least some identifiable data
@@ -227,44 +273,71 @@ export async function resolveWork(input: ResolveInput): Promise<ResolveResult> {
     };
   }
 
-  let result: ResolveResult;
+  // Try to acquire lock to prevent concurrent duplicate resolution
+  const lockAcquired = await tryAcquireResolutionLock(cacheKey);
 
-  // Route to appropriate path based on available identifiers
-  // Priority order ensures highest-confidence paths are tried first
-
-  if (input.isbn13 || input.isbn10) {
-    // Path 1: ISBN-based resolution (highest priority)
-    result = await resolveByIsbn(input);
-  } else if (input.googleVolumeId) {
-    // Path 2: Google Books Volume ID
-    result = await resolveByGoogleVolumeId(input);
-  } else if (input.title && input.author) {
-    // Path 3: Title + Author via Google Books search
-    result = await resolveByTitleAuthor(input);
-  } else if (input.asin) {
-    // Path 4: ASIN only (Kindle)
-    result = await resolveByAsin(input);
-  } else if (input.royalRoadId) {
-    // Path 5: Royal Road fiction ID
-    result = await resolveByRoyalRoad(input);
-  } else if (input.goodreadsId) {
-    // Path 6: Goodreads book ID
-    result = await resolveByGoodreadsId(input);
-  } else if (input.title) {
-    // Path 7: Title only - try Google Books then manual
-    result = await resolveByTitleAuthor(input);
-  } else {
-    // This shouldn't happen given the hasIdentifier check above
-    throw new Error("No resolution path available for input");
+  if (!lockAcquired) {
+    // Another process is resolving this key - wait a bit and check cache again
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const recheckCached = await checkCache(cacheKey);
+    if (recheckCached) {
+      logger.debug("Resolved (concurrent cache)", { title: displayTitle, workId: recheckCached.workId });
+      return {
+        workId: recheckCached.workId,
+        editionId: recheckCached.editionId,
+        confidence: recheckCached.confidence,
+        created: false,
+        path: recheckCached.path,
+        source: recheckCached.source,
+      };
+    }
+    // Proceed without lock if cache still empty (concurrent process may have failed)
   }
 
-  // Cache and log the resolution
-  await storeCache(cacheKey, result);
-  await logResolution(cacheKey, input, result);
+  let result: ResolveResult;
 
-  // TODO: Re-enable after adding GIN trigram index on Work.title
-  // Currently does full table scan on 18M rows (~4-5 sec per book)
-  // await checkAndMergeDuplicates(result, input);
+  try {
+    // Route to appropriate path based on available identifiers
+    // Priority order ensures highest-confidence paths are tried first
+
+    if (input.isbn13 || input.isbn10) {
+      // Path 1: ISBN-based resolution (highest priority)
+      result = await resolveByIsbn(input);
+    } else if (input.googleVolumeId) {
+      // Path 2: Google Books Volume ID
+      result = await resolveByGoogleVolumeId(input);
+    } else if (input.title && input.author) {
+      // Path 3: Title + Author via Google Books search
+      result = await resolveByTitleAuthor(input);
+    } else if (input.asin) {
+      // Path 4: ASIN only (Kindle)
+      result = await resolveByAsin(input);
+    } else if (input.royalRoadId) {
+      // Path 5: Royal Road fiction ID
+      result = await resolveByRoyalRoad(input);
+    } else if (input.goodreadsId) {
+      // Path 6: Goodreads book ID
+      result = await resolveByGoodreadsId(input);
+    } else if (input.title) {
+      // Path 7: Title only - try Google Books then manual
+      result = await resolveByTitleAuthor(input);
+    } else {
+      // This shouldn't happen given the hasIdentifier check above
+      throw new Error("No resolution path available for input");
+    }
+
+    // Cache and log the resolution
+    await storeCache(cacheKey, result);
+    await logResolution(cacheKey, input, result);
+  } finally {
+    // Always release lock if we acquired it
+    if (lockAcquired) {
+      await releaseResolutionLock(cacheKey);
+    }
+  }
+
+  // Check for and merge duplicates (requires GIN trigram index from migration 013)
+  await checkAndMergeDuplicates(result, input);
 
   // Log result
   const status = result.created ? "+" : "=";

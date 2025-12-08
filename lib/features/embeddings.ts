@@ -10,10 +10,10 @@ import { buildEmbeddingText } from "@/lib/util/text";
 import { logger, createTimer } from "@/lib/util/logger";
 import { getEnv } from "@/lib/config/env";
 
-// Rate limiter for OpenAI API
+// Rate limiter for OpenAI API - allow more parallel requests
 const limiter = new Bottleneck({
-  minTime: 100, // 10 requests per second
-  maxConcurrent: 5,
+  minTime: 50, // 20 requests per second
+  maxConcurrent: 10,
 });
 
 let openai: OpenAI | null = null;
@@ -163,94 +163,156 @@ async function generateEmbeddingsBatch(
 }
 
 /**
+ * Process a single batch of works - used by parallel workers
+ */
+async function processBatch(
+  works: WorkForEmbedding[]
+): Promise<{ processed: number; failed: number }> {
+  let processed = 0;
+  let failed = 0;
+
+  const texts = works.map((work) =>
+    buildEmbeddingText({
+      title: work.title,
+      subtitle: work.subtitle,
+      description: work.description,
+      authors: work.authors,
+      subjects: work.subjects,
+    })
+  );
+
+  // Track which works succeeded for better error context
+  const successfulIds: number[] = [];
+  const failedIds: number[] = [];
+
+  try {
+    const embeddings = await generateEmbeddingsBatch(texts);
+
+    // Store embeddings in database
+    await transaction(async (client) => {
+      for (let i = 0; i < works.length; i++) {
+        const work = works[i];
+        const embedding = embeddings[i];
+        const vectorLit = toVectorLiteral(embedding);
+
+        await client.query(
+          `UPDATE "Work" SET embedding = $1::vector, updated_at = NOW() WHERE id = $2`,
+          [vectorLit, work.id]
+        );
+        successfulIds.push(work.id);
+      }
+    });
+
+    processed = works.length;
+  } catch (error) {
+    logger.error("Batch embedding failed", {
+      error: String(error),
+      batchSize: works.length,
+      firstWorkId: works[0]?.id,
+      successfulBeforeFailure: successfulIds.length,
+    });
+    failed = works.length;
+
+    // Try one by one on failure to salvage what we can
+    for (const work of works) {
+      // Skip works that already succeeded in the batch
+      if (successfulIds.includes(work.id)) {
+        processed++;
+        failed--;
+        continue;
+      }
+
+      try {
+        const text = buildEmbeddingText({
+          title: work.title,
+          subtitle: work.subtitle,
+          description: work.description,
+          authors: work.authors,
+          subjects: work.subjects,
+        });
+
+        const embedding = await generateEmbedding(text);
+        const vectorLit = toVectorLiteral(embedding);
+
+        await query(
+          `UPDATE "Work" SET embedding = $1::vector, updated_at = NOW() WHERE id = $2`,
+          [vectorLit, work.id]
+        );
+
+        processed++;
+        failed--;
+      } catch (err) {
+        failedIds.push(work.id);
+        logger.warn("Failed to embed individual work", {
+          workId: work.id,
+          title: work.title.slice(0, 50),
+          error: String(err),
+        });
+      }
+    }
+
+    if (failedIds.length > 0) {
+      logger.error("Embedding batch had failures", {
+        totalFailed: failedIds.length,
+        failedWorkIds: failedIds.slice(0, 10), // Log first 10
+      });
+    }
+  }
+
+  return { processed, failed };
+}
+
+/**
  * Build embeddings for all quality works without them.
  *
  * Processes works with community engagement (2+ users OR 1+ ratings),
  * ordered by popularity. Runs until all qualifying works have embeddings.
+ * Uses parallel workers for faster processing.
  */
 export async function buildWorkEmbeddings(options: {
   batchSize?: number;
+  parallelBatches?: number;
 }): Promise<{ processed: number; failed: number }> {
-  const { batchSize = 50 } = options;
+  const { batchSize = 100, parallelBatches = 4 } = options;
 
-  logger.info("Starting embedding generation for quality works", { batchSize });
+  logger.info("Starting embedding generation for quality works", {
+    batchSize,
+    parallelBatches,
+    effectiveParallel: batchSize * parallelBatches
+  });
   const timer = createTimer("Embedding generation");
 
-  let processed = 0;
-  let failed = 0;
+  let totalProcessed = 0;
+  let totalFailed = 0;
 
   while (true) {
-    const works = await getWorksNeedingEmbeddings(batchSize);
+    // Fetch enough works for all parallel batches
+    const works = await getWorksNeedingEmbeddings(batchSize * parallelBatches);
 
     if (works.length === 0) {
       logger.info("No more works need embeddings");
       break;
     }
 
-    // Build texts for batch
-    const texts = works.map((work) =>
-      buildEmbeddingText({
-        title: work.title,
-        subtitle: work.subtitle,
-        description: work.description,
-        authors: work.authors,
-        subjects: work.subjects,
-      })
-    );
-
-    try {
-      const embeddings = await generateEmbeddingsBatch(texts);
-
-      // Store embeddings in database
-      await transaction(async (client) => {
-        for (let i = 0; i < works.length; i++) {
-          const work = works[i];
-          const embedding = embeddings[i];
-          const vectorLit = toVectorLiteral(embedding);
-
-          await client.query(
-            `UPDATE "Work" SET embedding = $1::vector, updated_at = NOW() WHERE id = $2`,
-            [vectorLit, work.id]
-          );
-        }
-      });
-
-      processed += works.length;
-      logger.info(`Processed ${processed} works`);
-    } catch (error) {
-      logger.error("Batch embedding failed", { error: String(error) });
-      failed += works.length;
-
-      // Try one by one on failure
-      for (const work of works) {
-        try {
-          const text = buildEmbeddingText({
-            title: work.title,
-            subtitle: work.subtitle,
-            description: work.description,
-            authors: work.authors,
-            subjects: work.subjects,
-          });
-
-          const embedding = await generateEmbedding(text);
-          const vectorLit = toVectorLiteral(embedding);
-
-          await query(
-            `UPDATE "Work" SET embedding = $1::vector, updated_at = NOW() WHERE id = $2`,
-            [vectorLit, work.id]
-          );
-
-          processed++;
-          failed--; // Undo the batch failure count
-        } catch (err) {
-          logger.warn(`Failed to embed work ${work.id}`, { error: String(err) });
-        }
-      }
+    // Split into parallel batches
+    const batches: WorkForEmbedding[][] = [];
+    for (let i = 0; i < works.length; i += batchSize) {
+      batches.push(works.slice(i, i + batchSize));
     }
+
+    // Process all batches in parallel
+    const results = await Promise.all(batches.map(processBatch));
+
+    for (const result of results) {
+      totalProcessed += result.processed;
+      totalFailed += result.failed;
+    }
+
+    logger.info(`Processed ${totalProcessed} works (${works.length} this round, ${parallelBatches} parallel batches)`);
   }
 
-  timer.end({ processed, failed });
-  return { processed, failed };
+  timer.end({ processed: totalProcessed, failed: totalFailed });
+  return { processed: totalProcessed, failed: totalFailed };
 }
 
 /**

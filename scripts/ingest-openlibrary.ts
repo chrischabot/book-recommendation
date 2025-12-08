@@ -67,6 +67,7 @@ const { values } = parseArgs({
     max: { type: "string", default: "" },
     "skip-lines": { type: "string", default: "" },
     "skip-refresh": { type: "boolean", default: false },
+    fast: { type: "boolean", default: false },
   },
   allowPositionals: true,
 });
@@ -76,6 +77,7 @@ async function main() {
   const maxItems = values.max ? parseInt(values.max, 10) : undefined;
   const skipLines = values["skip-lines"] ? parseInt(values["skip-lines"], 10) : undefined;
   const skipRefresh = values["skip-refresh"];
+  const fast = values.fast;
 
   // Determine tables to ingest: explicit --tables overrides --preset
   let tables: string[];
@@ -91,7 +93,7 @@ async function main() {
     tables = PRESETS[presetName];
   }
 
-  logger.info("Starting Open Library ingestion", { dir, tables, maxItems });
+  logger.info("Starting Open Library ingestion", { dir, tables, maxItems, fast });
 
   if (!existsSync(dir)) {
     logger.error(`Directory not found: ${dir}`);
@@ -116,12 +118,19 @@ async function main() {
 
   // Process tables in dependency order
   // 1. Core catalog (authors first, then works, then editions)
-  await tryIngest("authors", ingestAuthors);
+  if (tables.includes("authors")) {
+    const filePath = join(dir, DUMP_FILES.authors);
+    if (existsSync(filePath)) {
+      stats.authors = await ingestAuthors(filePath, { maxItems, fast });
+    } else {
+      logger.warn(`Authors file not found: ${filePath}`);
+    }
+  }
 
   if (tables.includes("works")) {
     const filePath = join(dir, DUMP_FILES.works);
     if (existsSync(filePath)) {
-      stats.works = await ingestWorks(filePath, { maxItems, skipLines });
+      stats.works = await ingestWorks(filePath, { maxItems, skipLines, fast });
       // Link works to authors
       if (tables.includes("authors")) {
         await linkWorkAuthors(filePath);

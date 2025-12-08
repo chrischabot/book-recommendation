@@ -438,3 +438,253 @@ export async function getListMates(
     sharedLists: parseInt(row.shared_lists, 10),
   }));
 }
+
+// ============================================================================
+// Enhanced Collaborative Filtering with Jaccard Similarity
+// ============================================================================
+
+export interface CooccurrenceResult {
+  olWorkKey: string;
+  overlap: number;
+  jaccard: number;
+  readersA: number;
+  readersB: number;
+}
+
+/**
+ * Get similar books from precomputed co-occurrence table (fast)
+ * Uses Jaccard similarity for better ranking than raw overlap
+ * Checks both directions since table may be asymmetric
+ */
+export async function getSimilarWorksPrecomputed(
+  olWorkKey: string,
+  limit = 50,
+  minOverlap = 2 // Filter to list-based CF (overlap >= 2), not author-based (overlap = 1)
+): Promise<CooccurrenceResult[]> {
+  const { rows } = await query<{
+    related_key: string;
+    overlap: number;
+    jaccard: string;
+    readers_a: number;
+    readers_b: number;
+  }>(
+    `
+    SELECT related_key, overlap, jaccard, readers_a, readers_b
+    FROM (
+      -- Forward direction: work_key_a = target
+      SELECT work_key_b as related_key, overlap, jaccard, readers_a, readers_b
+      FROM "WorkCooccurrence"
+      WHERE work_key_a = $1 AND overlap >= $3
+      UNION ALL
+      -- Reverse direction: work_key_b = target
+      SELECT work_key_a as related_key, overlap, jaccard, readers_b as readers_a, readers_a as readers_b
+      FROM "WorkCooccurrence"
+      WHERE work_key_b = $1 AND overlap >= $3
+    ) combined
+    ORDER BY jaccard DESC
+    LIMIT $2
+    `,
+    [olWorkKey, limit, minOverlap]
+  );
+
+  return rows.map((row) => ({
+    olWorkKey: row.related_key,
+    overlap: row.overlap,
+    jaccard: parseFloat(row.jaccard),
+    readersA: row.readers_a,
+    readersB: row.readers_b,
+  }));
+}
+
+/**
+ * Get similar books with Jaccard similarity (real-time computation)
+ * Use this for works not in precomputed table
+ */
+export async function getAlsoReadWorksJaccard(
+  olWorkKey: string,
+  limit = 50,
+  minOverlap = 3
+): Promise<CooccurrenceResult[]> {
+  const { rows } = await query<{
+    work_key_b: string;
+    overlap: string;
+    jaccard: string;
+    readers_a: string;
+    readers_b: string;
+  }>(
+    `
+    WITH seed_readers AS (
+      SELECT DISTINCT ol_user_key
+      FROM "OLReadingLog"
+      WHERE work_key = $1 AND status = 'already-read'
+    ),
+    seed_count AS (SELECT COUNT(*) as n FROM seed_readers),
+    coread AS (
+      SELECT
+        r2.work_key as work_key_b,
+        COUNT(DISTINCT r2.ol_user_key) as overlap
+      FROM seed_readers sr
+      JOIN "OLReadingLog" r2 ON r2.ol_user_key = sr.ol_user_key
+      WHERE r2.work_key != $1 AND r2.status = 'already-read'
+      GROUP BY r2.work_key
+      HAVING COUNT(DISTINCT r2.ol_user_key) >= $3
+    ),
+    other_counts AS (
+      SELECT work_key, COUNT(DISTINCT ol_user_key) as readers
+      FROM "OLReadingLog"
+      WHERE work_key IN (SELECT work_key_b FROM coread)
+      AND status = 'already-read'
+      GROUP BY work_key
+    )
+    SELECT
+      c.work_key_b,
+      c.overlap,
+      sc.n as readers_a,
+      oc.readers as readers_b,
+      c.overlap::FLOAT / (sc.n + oc.readers - c.overlap) as jaccard
+    FROM coread c
+    CROSS JOIN seed_count sc
+    JOIN other_counts oc ON oc.work_key = c.work_key_b
+    ORDER BY jaccard DESC
+    LIMIT $2
+    `,
+    [olWorkKey, limit, minOverlap]
+  );
+
+  return rows.map((row) => ({
+    olWorkKey: row.work_key_b,
+    overlap: parseInt(row.overlap, 10),
+    jaccard: parseFloat(row.jaccard),
+    readersA: parseInt(row.readers_a, 10),
+    readersB: parseInt(row.readers_b, 10),
+  }));
+}
+
+/**
+ * Get similar books - tiered approach for best results
+ *
+ * Tries sources in order:
+ * 1. List-based CF (overlap>=2) - highest quality, users who made similar lists
+ * 2. Author-based CF (overlap=1) - fallback, books by same author
+ * 3. Real-time computation - if precomputed data unavailable
+ */
+export async function getSimilarWorks(
+  olWorkKey: string,
+  limit = 50
+): Promise<CooccurrenceResult[]> {
+  // Try list-based CF first (overlap >= 2) - best quality signal
+  const listBased = await getSimilarWorksPrecomputed(olWorkKey, limit, 2);
+  if (listBased.length > 0) {
+    return listBased;
+  }
+
+  // Fall back to author-based CF (overlap = 1) for modern/sparse books
+  const authorBased = await getSimilarWorksPrecomputed(olWorkKey, limit, 1);
+  if (authorBased.length > 0) {
+    return authorBased;
+  }
+
+  // Final fallback to real-time computation
+  return getAlsoReadWorksJaccard(olWorkKey, limit);
+}
+
+/**
+ * Get similar books for multiple works (batch lookup)
+ * Used for building recommendations from user's reading history
+ *
+ * Uses tiered approach per work:
+ * - Returns list-based CF (overlap>=2) if available
+ * - Falls back to author-based (overlap=1) for sparse books
+ * Checks both directions since table may be asymmetric
+ */
+export async function getSimilarWorksBatch(
+  olWorkKeys: string[],
+  limitPerWork = 20
+): Promise<Map<string, CooccurrenceResult[]>> {
+  if (olWorkKeys.length === 0) return new Map();
+
+  // Fetch all pairs (overlap >= 1) from both directions and tier them
+  const { rows } = await query<{
+    source_key: string;
+    related_key: string;
+    overlap: number;
+    jaccard: string;
+    readers_a: number;
+    readers_b: number;
+  }>(
+    `
+    SELECT source_key, related_key, overlap, jaccard, readers_a, readers_b
+    FROM (
+      SELECT source_key, related_key, overlap, jaccard, readers_a, readers_b,
+        -- Prefer list-based (overlap>=2) over author-based (overlap=1)
+        ROW_NUMBER() OVER (
+          PARTITION BY source_key
+          ORDER BY CASE WHEN overlap >= 2 THEN 0 ELSE 1 END, jaccard DESC
+        ) as rn
+      FROM (
+        -- Forward direction
+        SELECT work_key_a as source_key, work_key_b as related_key, overlap, jaccard, readers_a, readers_b
+        FROM "WorkCooccurrence"
+        WHERE work_key_a = ANY($1)
+        UNION ALL
+        -- Reverse direction
+        SELECT work_key_b as source_key, work_key_a as related_key, overlap, jaccard, readers_b as readers_a, readers_a as readers_b
+        FROM "WorkCooccurrence"
+        WHERE work_key_b = ANY($1)
+      ) both_directions
+    ) ranked
+    WHERE rn <= $2
+    `,
+    [olWorkKeys, limitPerWork]
+  );
+
+  const result = new Map<string, CooccurrenceResult[]>();
+  for (const key of olWorkKeys) {
+    result.set(key, []);
+  }
+
+  for (const row of rows) {
+    const list = result.get(row.source_key);
+    if (list) {
+      list.push({
+        olWorkKey: row.related_key,
+        overlap: row.overlap,
+        jaccard: parseFloat(row.jaccard),
+        readersA: row.readers_a,
+        readersB: row.readers_b,
+      });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Get books in the same community as a given work
+ */
+export async function getCommunityCandidates(
+  workId: number,
+  limit = 100
+): Promise<Array<{ workId: number; communityId: number }>> {
+  const { rows } = await query<{
+    id: number;
+    community_id: number;
+  }>(
+    `
+    SELECT w2.id, w2.community_id
+    FROM "Work" w1
+    JOIN "Work" w2 ON w2.community_id = w1.community_id
+    WHERE w1.id = $1
+    AND w2.id != $1
+    AND w2.community_id IS NOT NULL
+    ORDER BY RANDOM()
+    LIMIT $2
+    `,
+    [workId, limit]
+  );
+
+  return rows.map((row) => ({
+    workId: row.id,
+    communityId: row.community_id,
+  }));
+}

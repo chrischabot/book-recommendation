@@ -5,7 +5,7 @@
 
 import { query, transaction } from "@/lib/db/pool";
 import { logger, createTimer } from "@/lib/util/logger";
-import { searchGoogleBooks, type GBSearchResult } from "./googlebooks";
+import { searchGoogleBooks, fetchGoogleBooksById, type GBSearchResult } from "./googlebooks";
 import { STUB_THRESHOLD } from "./resolverV2/types";
 
 interface WorkToEnrich {
@@ -26,21 +26,33 @@ interface EnrichmentResult {
   coverAdded: boolean;
   categoriesAdded: number;
   ratingsAdded: boolean;
+  authorsAdded: number;
 }
 
 /**
  * Find works that need enrichment
- * Priority: stubs first, then works missing description/cover
+ * Priority: stubs first, then works missing description/cover/authors
  */
 export async function findWorksToEnrich(options: {
   limit?: number;
   stubsOnly?: boolean;
+  missingAuthorsOnly?: boolean;
+  userBooksOnly?: boolean;
+  userId?: string;
 }): Promise<WorkToEnrich[]> {
-  const { limit = 100, stubsOnly = false } = options;
+  const { limit = 100, stubsOnly = false, missingAuthorsOnly = false, userBooksOnly = false, userId = "me" } = options;
 
   let whereClause = "w.is_stub = true";
-  if (!stubsOnly) {
+  if (missingAuthorsOnly) {
+    // Find works that have no authors linked
+    whereClause = `NOT EXISTS (SELECT 1 FROM "WorkAuthor" wa WHERE wa.work_id = w.id)`;
+  } else if (!stubsOnly) {
     whereClause = `(w.is_stub = true OR w.description IS NULL OR e.cover_url IS NULL)`;
+  }
+
+  // Optionally filter to only user's books
+  if (userBooksOnly) {
+    whereClause = `(${whereClause}) AND EXISTS (SELECT 1 FROM "UserEvent" ue WHERE ue.work_id = w.id AND ue.user_id = '${userId}')`;
   }
 
   const { rows } = await query<{
@@ -67,7 +79,13 @@ export async function findWorksToEnrich(options: {
      LEFT JOIN "WorkAuthor" wa ON wa.work_id = w.id
      LEFT JOIN "Author" a ON a.id = wa.author_id
      WHERE ${whereClause}
-     ORDER BY w.is_stub DESC, w.created_at ASC
+     ORDER BY
+       -- Prioritize works with identifiers (higher success rate)
+       CASE WHEN e.google_volume_id IS NOT NULL THEN 0
+            WHEN e.isbn13 IS NOT NULL OR e.isbn10 IS NOT NULL THEN 1
+            ELSE 2 END,
+       w.is_stub DESC,
+       w.created_at ASC
      LIMIT $1`,
     [limit]
   );
@@ -95,17 +113,25 @@ export async function enrichWork(work: WorkToEnrich): Promise<EnrichmentResult> 
     coverAdded: false,
     categoriesAdded: 0,
     ratingsAdded: false,
+    authorsAdded: 0,
   };
 
-  // Search Google Books by ISBN first, then title/author
+  // Search Google Books: volume ID > ISBN > title/author
   let gbData: GBSearchResult | null = null;
 
-  if (work.isbn13 || work.isbn10) {
+  // Try direct volume ID lookup first (most reliable)
+  if (work.googleVolumeId) {
+    gbData = await fetchGoogleBooksById(work.googleVolumeId);
+  }
+
+  // Fall back to ISBN search
+  if (!gbData && (work.isbn13 || work.isbn10)) {
     gbData = await searchGoogleBooks({
       isbn: work.isbn13 || work.isbn10 || undefined,
     });
   }
 
+  // Fall back to title/author search
   if (!gbData && work.title) {
     gbData = await searchGoogleBooks({
       title: work.title,
@@ -124,7 +150,7 @@ export async function enrichWork(work: WorkToEnrich): Promise<EnrichmentResult> 
   // Update work and edition with enriched data
   await transaction(async (client) => {
     // Update Work description and remove stub flag if enriched
-    if (gbData!.description && !work.hasDescription) {
+    if (gbData.description && !work.hasDescription) {
       await client.query(
         `UPDATE "Work" SET
            description = $2,
@@ -132,14 +158,14 @@ export async function enrichWork(work: WorkToEnrich): Promise<EnrichmentResult> 
            stub_reason = NULL,
            updated_at = NOW()
          WHERE id = $1 AND description IS NULL`,
-        [work.workId, gbData!.description]
+        [work.workId, gbData.description]
       );
       result.descriptionAdded = true;
     }
 
     // Update first_publish_year if missing
-    if (gbData!.publishedDate) {
-      const yearMatch = gbData!.publishedDate.match(/\b(19|20)\d{2}\b/);
+    if (gbData.publishedDate) {
+      const yearMatch = gbData.publishedDate.match(/\b(19|20)\d{2}\b/);
       if (yearMatch) {
         await client.query(
           `UPDATE "Work" SET
@@ -152,21 +178,21 @@ export async function enrichWork(work: WorkToEnrich): Promise<EnrichmentResult> 
     }
 
     // Update Edition with cover and identifiers
-    if (!work.hasCover && gbData!.coverUrl) {
+    if (!work.hasCover && gbData.coverUrl) {
       await client.query(
         `UPDATE "Edition" SET
            cover_url = COALESCE(cover_url, $2),
            google_volume_id = COALESCE(google_volume_id, $3),
            page_count = COALESCE(page_count, $4)
          WHERE work_id = $1`,
-        [work.workId, gbData!.coverUrl, gbData!.volumeId, gbData!.pageCount]
+        [work.workId, gbData.coverUrl, gbData.volumeId, gbData.pageCount]
       );
       result.coverAdded = true;
     }
 
     // Add categories as subjects
-    if (gbData!.categories && gbData!.categories.length > 0) {
-      for (const category of gbData!.categories) {
+    if (gbData.categories && gbData.categories.length > 0) {
+      for (const category of gbData.categories) {
         const normalized = category
           .toLowerCase()
           .replace(/\s+/g, "_")
@@ -176,13 +202,13 @@ export async function enrichWork(work: WorkToEnrich): Promise<EnrichmentResult> 
 
         await client.query(
           `INSERT INTO "Subject" (subject, typ) VALUES ($1, 'category')
-           ON CONFLICT DO NOTHING`,
+           ON CONFLICT (subject) DO NOTHING`,
           [normalized]
         );
 
         const { rowCount } = await client.query(
           `INSERT INTO "WorkSubject" (work_id, subject) VALUES ($1, $2)
-           ON CONFLICT DO NOTHING`,
+           ON CONFLICT (work_id, subject) DO NOTHING`,
           [work.workId, normalized]
         );
 
@@ -193,7 +219,7 @@ export async function enrichWork(work: WorkToEnrich): Promise<EnrichmentResult> 
     }
 
     // Add Google Books rating
-    if (gbData!.averageRating && gbData!.ratingsCount) {
+    if (gbData.averageRating && gbData.ratingsCount) {
       await client.query(
         `INSERT INTO "Rating" (work_id, source, avg, count, last_updated)
          VALUES ($1, 'googlebooks', $2, $3, NOW())
@@ -201,9 +227,48 @@ export async function enrichWork(work: WorkToEnrich): Promise<EnrichmentResult> 
            avg = EXCLUDED.avg,
            count = EXCLUDED.count,
            last_updated = NOW()`,
-        [work.workId, gbData!.averageRating, gbData!.ratingsCount]
+        [work.workId, gbData.averageRating, gbData.ratingsCount]
       );
       result.ratingsAdded = true;
+    }
+
+    // Add authors from Google Books
+    if (gbData.authors && gbData.authors.length > 0) {
+      for (const authorName of gbData.authors) {
+        const trimmedName = authorName.trim();
+        if (!trimmedName) continue;
+
+        // Find or create author
+        let authorId: number | null = null;
+        const { rows: existingAuthors } = await client.query<{ id: number }>(
+          `SELECT id FROM "Author" WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+          [trimmedName]
+        );
+
+        if (existingAuthors.length > 0) {
+          authorId = existingAuthors[0].id;
+        } else {
+          const { rows: newAuthor } = await client.query<{ id: number }>(
+            `INSERT INTO "Author" (name, created_at) VALUES ($1, NOW()) RETURNING id`,
+            [trimmedName]
+          );
+          authorId = newAuthor[0]?.id ?? null;
+        }
+
+        if (authorId) {
+          // Link author to work
+          const { rowCount } = await client.query(
+            `INSERT INTO "WorkAuthor" (work_id, author_id, role)
+             VALUES ($1, $2, 'author')
+             ON CONFLICT (work_id, author_id, role) DO NOTHING`,
+            [work.workId, authorId]
+          );
+
+          if (rowCount && rowCount > 0) {
+            result.authorsAdded++;
+          }
+        }
+      }
     }
 
     // Clear stub status if we got meaningful data
@@ -219,7 +284,8 @@ export async function enrichWork(work: WorkToEnrich): Promise<EnrichmentResult> 
     result.descriptionAdded ||
     result.coverAdded ||
     result.categoriesAdded > 0 ||
-    result.ratingsAdded;
+    result.ratingsAdded ||
+    result.authorsAdded > 0;
 
   if (result.enriched) {
     logger.debug("Enriched work from Google Books", {
@@ -237,6 +303,9 @@ export async function enrichWork(work: WorkToEnrich): Promise<EnrichmentResult> 
 export async function enrichWorks(options: {
   limit?: number;
   stubsOnly?: boolean;
+  missingAuthorsOnly?: boolean;
+  userBooksOnly?: boolean;
+  userId?: string;
   delayMs?: number;
 }): Promise<{
   total: number;
@@ -245,10 +314,11 @@ export async function enrichWorks(options: {
   descriptions: number;
   covers: number;
   ratings: number;
+  authors: number;
 }> {
-  const { limit = 100, stubsOnly = false, delayMs = 1000 } = options;
+  const { limit = 100, stubsOnly = false, missingAuthorsOnly = false, userBooksOnly = false, userId = "me", delayMs = 1000 } = options;
 
-  logger.info("Starting work enrichment", { limit, stubsOnly });
+  logger.info("Starting work enrichment", { limit, stubsOnly, missingAuthorsOnly, userBooksOnly });
   const timer = createTimer("Work enrichment");
 
   const stats = {
@@ -258,9 +328,10 @@ export async function enrichWorks(options: {
     descriptions: 0,
     covers: 0,
     ratings: 0,
+    authors: 0,
   };
 
-  const works = await findWorksToEnrich({ limit, stubsOnly });
+  const works = await findWorksToEnrich({ limit, stubsOnly, missingAuthorsOnly, userBooksOnly, userId });
   stats.total = works.length;
 
   logger.info(`Found ${works.length} works to enrich`);
@@ -274,6 +345,7 @@ export async function enrichWorks(options: {
         if (result.descriptionAdded) stats.descriptions++;
         if (result.coverAdded) stats.covers++;
         if (result.ratingsAdded) stats.ratings++;
+        stats.authors += result.authorsAdded;
       }
 
       // Rate limit to avoid hitting Google Books API limits

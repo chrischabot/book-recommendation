@@ -151,13 +151,17 @@ async function parseAllRows(csvPath: string): Promise<ParsedBook[]> {
   );
 
   for await (const row of parser as AsyncIterable<GoodreadsRow>) {
+    // Goodreads uses "0" to mean "no rating", so treat 0 as null
+    const rawRating = row["My Rating"] ? parseFloat(row["My Rating"]) : null;
+    const rating = rawRating && rawRating > 0 ? rawRating : null;
+
     books.push({
       isbn13: cleanIsbn(row.ISBN13 || ""),
       isbn10: cleanIsbn(row.ISBN || ""),
       title: row.Title,
       author: row.Author,
       shelf: mapShelf(row["Exclusive Shelf"] || "read"),
-      rating: row["My Rating"] ? parseFloat(row["My Rating"]) : null,
+      rating,
       finishedAt: parseDate(row["Date Read"]),
       notes: row["My Review"] || null,
     });

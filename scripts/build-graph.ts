@@ -16,6 +16,7 @@ import { closePool } from "@/lib/db/pool";
 import { logger } from "@/lib/util/logger";
 
 const { values } = parseArgs({
+  allowPositionals: true,
   options: {
     user: { type: "string", default: "me" },
     "skip-populate": { type: "boolean", default: false },

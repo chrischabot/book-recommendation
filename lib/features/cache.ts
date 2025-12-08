@@ -6,18 +6,29 @@
 import { Redis } from "ioredis";
 import { query, transaction } from "@/lib/db/pool";
 import { logger } from "@/lib/util/logger";
-import { hasRedis } from "@/lib/config/env";
+import { getEnv } from "@/lib/config/env";
 
 let redis: Redis | null = null;
+
+/**
+ * Check if Redis is configured with a valid URL
+ */
+function hasValidRedisConfig(): boolean {
+  const redisUrl = getEnv().REDIS_URL;
+  return typeof redisUrl === "string" && redisUrl.length > 0;
+}
 
 /**
  * Get Redis client if configured
  */
 function getRedis(): Redis | null {
-  if (!hasRedis()) return null;
+  if (!hasValidRedisConfig()) return null;
 
   if (!redis) {
-    redis = new Redis(process.env.REDIS_URL!);
+    const redisUrl = getEnv().REDIS_URL;
+    if (!redisUrl) return null; // Type guard for TypeScript
+
+    redis = new Redis(redisUrl);
     redis.on("error", (err) => {
       logger.warn("Redis error", { error: String(err) });
     });

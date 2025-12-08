@@ -14,7 +14,9 @@ Unlike the recommendation engines of major retailers—which seem convinced that
 - **Imports** your reading history from Goodreads exports and Kindle data
 - **Embeds** books using OpenAI's text-embedding-3-large (the ~550K works people actually read)
 - **Builds** a taste profile from your reading patterns, weighted by ratings and engagement
-- **Recommends** books using vector similarity, with diversity constraints so you don't get fifteen variations of the same novel
+- **Recommends** books using vector similarity, collaborative filtering, and diversity constraints
+- **Searches** your library with fuzzy trigram matching for titles and authors
+- **Visualizes** your "Reading DNA"—the books that most define your taste
 - **Explains** why each book was suggested, because recommendations without reasons are just guesses with confidence
 
 ## Tech Stack
@@ -22,8 +24,8 @@ Unlike the recommendation engines of major retailers—which seem convinced that
 | Component | Choice |
 |-----------|--------|
 | Framework | Next.js 16 (App Router) |
-| Database | PostgreSQL 16 + pgvector |
-| Embeddings | OpenAI text-embedding-3-large |
+| Database | PostgreSQL 16 + pgvector + pg_trgm |
+| Embeddings | OpenAI text-embedding-3-large (1536 dims) |
 | Styling | Tailwind CSS |
 | Runtime | Node.js 20+ |
 
@@ -130,6 +132,102 @@ Good recommendations require more than similarity. This system:
 
 The goal isn't to maximize engagement or sell you anything. It's to help you find books worth your finite reading hours.
 
+## Book Resolution
+
+Not every book lives in Open Library. Kindle exclusives, self-published gems, web serials—the literary demimonde exists, and this system knows how to find it.
+
+### Multi-Source Resolution
+
+When you import a book, the resolver attempts identification through multiple paths, each with its own confidence score:
+
+| Path | Confidence | Description |
+|------|------------|-------------|
+| ISBN → Open Library | 0.98 | The gold standard. ISBN matched to OL's canonical work. |
+| ISBN → Google Books | 0.85 | OL miss, but Google knows this one. |
+| Google Volume ID | 0.82 | Direct Google Books lookup. |
+| Title + Author → Google | 0.80 | Fuzzy matching when ISBNs are absent. |
+| ASIN (Kindle) | 0.65 | Amazon's identifier. May merge later when better ID surfaces. |
+| Royal Road ID | 0.60 | Web serial. The frontier of literature. |
+| Goodreads ID | 0.55 | ID only—Goodreads guards its data jealously. |
+
+### Duplicate Detection
+
+The system employs trigram similarity matching (via PostgreSQL's `pg_trgm`) to detect when that "new" Kindle import is actually *The Great Gatsby* with a different cover. When duplicates are found, they're merged—editions consolidated, reading history unified, your recommendations none the wiser about the bibliographic chaos that nearly was.
+
+### Concurrent Resolution
+
+When importing large libraries, multiple books may resolve simultaneously. Advisory locking prevents the same work from being created twice by overeager parallel processes. The database remains pristine; the importer remains fast.
+
+## How It Learns Your Taste
+
+Your taste profile is built from multiple engagement signals, not just star ratings. The system extracts behavioral data from your Kindle reading patterns to understand *how* you read, not just *what* you read.
+
+### Signals We Extract
+
+| Signal | What It Means | Weight Impact |
+|--------|---------------|---------------|
+| **5-Star Ratings** | Explicit preference declaration | 4x boost |
+| **Re-reads** | You loved it enough to read it again | Up to 3x boost |
+| **Binge Sessions** | 4+ hour max session = couldn't put it down | Up to 1.5x boost |
+| **Session Quality** | Long average sessions = deep engagement | Up to 1.5x boost |
+| **Author Loyalty** | 3+ books by same author | Up to 2x boost |
+| **Series Velocity** | Finished next book within 3 days | 1.3x boost |
+| **Purchase vs KU** | Paid money = higher commitment | 1.15x boost |
+
+### The DNF Paradox
+
+Here's something counterintuitive: a "Did Not Finish" after 40 hours isn't a negative signal—it's positive. You spent 40 hours in that series because you *loved* it. You DNF'd because you wanted variety, not because you disliked it.
+
+The system distinguishes:
+- **DNF < 6 hours**: Never clicked with you. Negative signal.
+- **DNF ≥ 6 hours**: Enjoyed it, moved on for variety. Neutral (no penalty).
+
+### Recency Decay
+
+Not all old favorites fade equally. Books with high engagement signals (re-reads, binge sessions) decay slower:
+- **Normal books**: 2-year half-life
+- **High-engagement favorites**: 4-year half-life
+
+That book you've re-read five times will stay relevant to your profile much longer than something you read once in 2019.
+
+## Your Reading DNA
+
+The `/profile` page reveals the books that most shape your recommendations—your "Reading DNA." Each anchor book displays the engagement signals that earned its influence:
+
+| Signal | Icon | Meaning |
+|--------|------|---------|
+| 5-Star | ★ | You gave it a perfect rating |
+| Re-read | ↻ | You've read it multiple times |
+| Binge | 🔥 | 4+ hour reading session |
+| Deep Read | ⏱ | Long average session times |
+| Fave Author | ♥ | You've read 3+ books by this author |
+| Series Binge | ⚡ | Finished within 3 days of previous book |
+| Purchased | $ | Bought, not borrowed |
+
+You can also manually add books to your DNA using the favorite button on any book page. This is useful when the algorithm underweights something you particularly loved.
+
+## Search
+
+The `/search` page provides fuzzy search across your library using PostgreSQL's trigram similarity. Type a partial title or author name—even with typos—and the system finds what you're looking for. Results show match type (title vs. author match) and link directly to recommendation pages.
+
+Search uses `pg_trgm` GIN indexes for sub-second fuzzy matching across millions of works.
+
+## Collaborative Filtering
+
+Beyond vector similarity, the system uses collaborative signals from Open Library's community:
+
+### "Readers Also Read"
+
+From millions of reading logs, we compute which books are frequently read together. The `WorkCooccurrence` table stores Jaccard similarity between work pairs—if 80% of people who read Book A also read Book B, that's a strong signal.
+
+### Book Communities
+
+Using co-occurrence data, we detect clusters of books that belong together (via label propagation). Each work gets a `community_id`, enabling recommendations like "other books in this reading community."
+
+### List Companions
+
+Open Library users create curated lists. Books appearing together in many lists share something—theme, mood, era—that pure vector similarity might miss.
+
 ## Scripts
 
 ```bash
@@ -141,11 +239,20 @@ pnpm download:ol         # Download Open Library dumps
 pnpm ingest:ol           # Ingest catalog data
 pnpm enrich:gb           # Enrich with Google Books
 pnpm enrich:descriptions # Fetch missing book descriptions
+pnpm enrich:unknown-gb   # Small, bounded Google Books enrichment for unknown works
 pnpm import:goodreads    # Import your Goodreads export
 pnpm import:kindle       # Import your Kindle data
 pnpm features:embed      # Generate embeddings
+pnpm embed:user-events   # Embed all works in user's reading history
 pnpm profile:build       # Build taste profile
 pnpm refresh:all         # Refresh computed features
+
+# Collaborative filtering & maintenance
+pnpm cooccurrence:build  # Compute book co-occurrence (Jaccard similarity)
+pnpm communities:build   # Detect book communities via label propagation
+pnpm dedupe:cross-source # Merge duplicate works across data sources
+pnpm enrich:authors      # Fetch missing author metadata
+pnpm backup:embeddings   # Backup embeddings before migrations
 ```
 
 ## API Endpoints
@@ -154,7 +261,31 @@ pnpm refresh:all         # Refresh computed features
 GET /api/recommendations/general          # Personalized picks
 GET /api/recommendations/by-book?work_id= # "More like this"
 GET /api/recommendations/by-category?slug=# By genre
+GET /api/profile?user_id=me               # Your taste profile with anchors
+GET /api/profile/favorites?work_id=       # Check/manage favorite status
+GET /api/search?q=&page=&page_size=       # Fuzzy search by title/author
+GET /api/books/[workId]                   # Book details
 ```
+
+## Database Indexes
+
+Performance at scale requires forethought. The system uses specialized PostgreSQL indexes:
+
+| Index | Type | Purpose |
+|-------|------|---------|
+| `work_embedding_ivfflat` | IVFFlat (pgvector) | Approximate nearest neighbor search across millions of works |
+| `work_title_trgm_idx` | GIN (pg_trgm) | Fuzzy title matching for search and deduplication |
+| `author_name_trgm_idx` | GIN (pg_trgm) | Fuzzy author name matching |
+| `cooccurrence_a_jaccard_idx` | B-tree | Fast collaborative filtering lookups |
+| `work_community_idx` | B-tree | Community-based recommendations |
+
+The vector index uses IVFFlat with 500 lists—a balance between recall and speed suitable for datasets up to ~5M embedded works. Embeddings are dimension-reduced to 1536 (from the model's native 3072) to stay within pgvector's indexing limits while preserving semantic fidelity.
+
+## Development
+
+In development mode (`NODE_ENV=development`), API error responses include full stack traces and expandable error details. Production errors are logged but return only generic messages—because users don't need to know about your database connection pool exhaustion at 3am.
+
+The app includes global error boundaries (`app/error.tsx` and `app/global-error.tsx`) that provide graceful recovery options for users while logging full stack traces for debugging.
 
 ## License
 

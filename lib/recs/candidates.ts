@@ -10,7 +10,14 @@ import { parseVector } from "@/lib/db/vector";
 import { getCategoryConstraints } from "@/lib/config/categories";
 import { getOrBuildUserProfile } from "@/lib/features/userProfile";
 import { getCachedCandidates, setCachedCandidates } from "@/lib/features/cache";
-import { getAlsoReadWorks, getListMates, getTrendingWorks } from "@/lib/features/ratings";
+import {
+  getAlsoReadWorks,
+  getListMates,
+  getTrendingWorks,
+  getSimilarWorks,
+  getSimilarWorksBatch,
+  getCommunityCandidates,
+} from "@/lib/features/ratings";
 import { logger, createTimer } from "@/lib/util/logger";
 
 export interface Candidate {
@@ -82,6 +89,67 @@ export async function generateGeneralCandidates(
     }
   }
 
+  // Collaborative filtering from anchor books (Jaccard-based)
+  // Look up OL work keys for anchors
+  const anchorWorkIds = profile.anchors.slice(0, 10).map((a) => a.workId);
+  const { rows: anchorOlRows } = await query<{ id: number; ol_work_key: string }>(
+    `SELECT id, ol_work_key FROM "Work" WHERE id = ANY($1) AND ol_work_key IS NOT NULL`,
+    [anchorWorkIds]
+  );
+  const workIdToOlKey = new Map(anchorOlRows.map((r) => [r.id, r.ol_work_key]));
+  const anchorOlKeys = anchorOlRows.map((r) => r.ol_work_key);
+
+  const collaborativeCandidates: { id: number; sim: number }[] = [];
+  if (anchorOlKeys.length > 0) {
+    const similarWorksBatch = await getSimilarWorksBatch(anchorOlKeys, 30);
+
+    // Resolve OL keys to work IDs
+    const allOlKeys = new Set<string>();
+    for (const [, results] of similarWorksBatch) {
+      for (const r of results) {
+        allOlKeys.add(r.olWorkKey);
+      }
+    }
+
+    if (allOlKeys.size > 0) {
+      const { rows: workRows } = await query<{ id: number; ol_work_key: string }>(
+        `SELECT id, ol_work_key FROM "Work" WHERE ol_work_key = ANY($1)`,
+        [Array.from(allOlKeys)]
+      );
+      const olKeyToId = new Map(workRows.map((r) => [r.ol_work_key, r.id]));
+
+      for (const [anchorKey, results] of similarWorksBatch) {
+        // Find anchor weight by looking up the work ID for this OL key
+        const anchorWorkId = anchorOlRows.find((r) => r.ol_work_key === anchorKey)?.id;
+        const anchorWeight = profile.anchors.find((a) => a.workId === anchorWorkId)?.weight ?? 1;
+        for (const r of results) {
+          const workId = olKeyToId.get(r.olWorkKey);
+          if (workId && !excludeWorkIds.includes(workId)) {
+            // Score based on Jaccard similarity weighted by anchor importance
+            collaborativeCandidates.push({
+              id: workId,
+              sim: r.jaccard * anchorWeight * 0.8,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // Community-based candidates from anchor books
+  const communityCandidates: { id: number; sim: number }[] = [];
+  for (const anchor of profile.anchors.slice(0, 3)) {
+    const communityWorks = await getCommunityCandidates(anchor.workId, 50);
+    for (const cw of communityWorks) {
+      if (!excludeWorkIds.includes(cw.workId)) {
+        communityCandidates.push({
+          id: cw.workId,
+          sim: 0.3 * anchor.weight, // Lower weight for community matches
+        });
+      }
+    }
+  }
+
   // Merge and deduplicate
   const candidateMap = new Map<number, Candidate>();
 
@@ -103,6 +171,34 @@ export async function generateGeneralCandidates(
         workId: gc.id,
         score: gc.sim,
         source: "graph",
+      });
+    }
+  }
+
+  // Collaborative filtering candidates (Jaccard-based)
+  for (const cc of collaborativeCandidates) {
+    const existing = candidateMap.get(cc.id);
+    if (existing) {
+      existing.score = Math.min(1.0, existing.score + cc.sim * 0.3);
+    } else {
+      candidateMap.set(cc.id, {
+        workId: cc.id,
+        score: cc.sim,
+        source: "collaborative",
+      });
+    }
+  }
+
+  // Community candidates
+  for (const cm of communityCandidates) {
+    const existing = candidateMap.get(cm.id);
+    if (existing) {
+      existing.score = Math.min(1.0, existing.score + cm.sim * 0.15);
+    } else {
+      candidateMap.set(cm.id, {
+        workId: cm.id,
+        score: cm.sim,
+        source: "graph", // Treat community as graph source
       });
     }
   }
@@ -186,13 +282,13 @@ export async function generateByBookCandidates(
   const excludeSet = new Set(excludeWorkIds);
 
   // Run different candidate sources in parallel
-  const [vectorCandidates, graphNeighbors, alsoReadWorks, listMates] = await Promise.all([
+  const [vectorCandidates, graphNeighbors, similarWorks, listMates] = await Promise.all([
     // Vector-based similar works
     knnFromVector(seedEmbedding, limit, excludeWorkIds),
     // Graph-based neighbors
     getGraphNeighbors(seedWorkId, 2),
-    // Collaborative: users who read this also read...
-    seedOlKey ? getAlsoReadWorks(seedOlKey, 50) : Promise.resolve([]),
+    // Collaborative: similar works via Jaccard (precomputed or real-time)
+    seedOlKey ? getSimilarWorks(seedOlKey, 100) : Promise.resolve([]),
     // Lists: books that appear in same lists
     seedOlKey ? getListMates(seedOlKey, 30) : Promise.resolve([]),
   ]);
@@ -224,25 +320,25 @@ export async function generateByBookCandidates(
     }
   }
 
-  // Collaborative candidates: "also read" from reading logs
-  if (alsoReadWorks.length > 0) {
+  // Collaborative candidates: similar works via Jaccard similarity
+  if (similarWorks.length > 0) {
     // Resolve OL keys to work IDs
-    const olKeys = alsoReadWorks.map((w) => w.olWorkKey);
+    const olKeys = similarWorks.map((w) => w.olWorkKey);
     const { rows: workRows } = await query<{ id: number; ol_work_key: string }>(
       `SELECT id, ol_work_key FROM "Work" WHERE ol_work_key = ANY($1)`,
       [olKeys]
     );
     const olKeyToId = new Map(workRows.map((r) => [r.ol_work_key, r.id]));
 
-    for (const also of alsoReadWorks) {
-      const workId = olKeyToId.get(also.olWorkKey);
+    for (const similar of similarWorks) {
+      const workId = olKeyToId.get(similar.olWorkKey);
       if (!workId || excludeSet.has(workId)) continue;
 
-      // Score based on overlap (log scaled)
-      const collabScore = Math.min(0.8, 0.3 + Math.log10(also.overlap + 1) * 0.2);
+      // Score based on Jaccard similarity (already normalized 0-1)
+      const collabScore = 0.3 + similar.jaccard * 0.5;
       const existing = candidateMap.get(workId);
       if (existing) {
-        existing.score = Math.min(1.0, existing.score + collabScore * 0.3);
+        existing.score = Math.min(1.0, existing.score + collabScore * 0.4);
       } else {
         candidateMap.set(workId, {
           workId,

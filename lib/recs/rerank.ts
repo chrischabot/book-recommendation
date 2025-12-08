@@ -343,7 +343,14 @@ export async function rerankCandidates(
 
     remaining.delete(bestCandidate.workId);
 
-    // Add to selected
+    // Calculate novelty score BEFORE adding to selectedEmbeddings
+    // This correctly measures diversity against already-selected items
+    const noveltyScore = calculateNoveltyScore(
+      bestCandidate.embedding,
+      selectedEmbeddings
+    );
+
+    // Now add to selected collections for future iterations
     if (bestCandidate.embedding) {
       selectedEmbeddings.push(bestCandidate.embedding);
     }
@@ -352,11 +359,6 @@ export async function rerankCandidates(
         selectedAuthors.add(author);
       }
     }
-
-    const noveltyScore = calculateNoveltyScore(
-      bestCandidate.embedding,
-      selectedEmbeddings.slice(0, -1)
-    );
 
     const finalScore =
       bestCandidate.baseScore * 0.7 + noveltyScore * weights.novelty;
@@ -386,25 +388,62 @@ export async function rerankCandidates(
 }
 
 /**
- * Calculate ILD (Intra-List Diversity) metric
+ * Calculate ILD (Intra-List Diversity) metric.
+ *
+ * ILD is the average pairwise distance between all items in the list.
+ * Higher values indicate more diverse recommendations.
+ *
+ * @param recommendations The list of recommendations
+ * @param embeddings Optional map of workId -> embedding for accurate calculation
+ * @returns ILD score between 0 and 1 (1 = maximally diverse)
  */
-export function calculateILD(recommendations: RankedRecommendation[]): number {
-  // This would require embeddings; simplified version uses diversity scores
+export function calculateILD(
+  recommendations: RankedRecommendation[],
+  embeddings?: Map<number, number[]>
+): number {
   if (recommendations.length <= 1) return 1;
 
-  let totalDiversity = 0;
+  let totalDistance = 0;
   let pairs = 0;
 
-  for (let i = 0; i < recommendations.length; i++) {
-    for (let j = i + 1; j < recommendations.length; j++) {
-      // Use diversity scores as proxy
-      totalDiversity +=
-        (recommendations[i].diversityScore + recommendations[j].diversityScore) / 2;
-      pairs++;
+  // If embeddings provided, calculate true pairwise distances
+  if (embeddings && embeddings.size > 0) {
+    for (let i = 0; i < recommendations.length; i++) {
+      const embI = embeddings.get(recommendations[i].workId);
+      if (!embI) continue;
+
+      for (let j = i + 1; j < recommendations.length; j++) {
+        const embJ = embeddings.get(recommendations[j].workId);
+        if (!embJ) continue;
+
+        // Distance = 1 - similarity (cosine similarity is between -1 and 1, usually 0-1 for embeddings)
+        const similarity = cosineSimilarity(embI, embJ);
+        totalDistance += 1 - similarity;
+        pairs++;
+      }
+    }
+  } else {
+    // Fallback: use author diversity as a proxy for diversity
+    // This is less accurate but doesn't require embeddings
+    const authorSets = recommendations.map((r) => new Set(r.authors));
+
+    for (let i = 0; i < recommendations.length; i++) {
+      for (let j = i + 1; j < recommendations.length; j++) {
+        // Jaccard distance for authors
+        const setI = authorSets[i];
+        const setJ = authorSets[j];
+        const intersection = [...setI].filter((a) => setJ.has(a)).length;
+        const union = new Set([...setI, ...setJ]).size;
+
+        // If no authors, assume maximum diversity
+        const jaccardSim = union > 0 ? intersection / union : 0;
+        totalDistance += 1 - jaccardSim;
+        pairs++;
+      }
     }
   }
 
-  return pairs > 0 ? totalDiversity / pairs : 0;
+  return pairs > 0 ? totalDistance / pairs : 1;
 }
 
 /**

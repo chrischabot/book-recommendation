@@ -353,12 +353,16 @@ async function streamTsv(
 /**
  * Ingest works from Open Library dump using bulk multi-row INSERT
  * This is 10-20x faster than individual INSERTs
+ *
+ * When fast=true, uses simple INSERT without ON CONFLICT (requires empty table)
+ * This is ~10x faster but will fail if duplicates exist
  */
 export async function ingestWorks(
   filePath: string,
-  options?: { batchSize?: number; maxItems?: number; skipLines?: number }
+  options?: { batchSize?: number; maxItems?: number; skipLines?: number; fast?: boolean }
 ): Promise<number> {
-  logger.info("Starting works ingestion (bulk mode)", { filePath });
+  const fast = options?.fast ?? false;
+  logger.info(`Starting works ingestion (${fast ? "FAST" : "bulk"} mode)`, { filePath, fast });
 
   const { batchSize = 2000, maxItems, skipLines = 0 } = options ?? {};
   let lineNumber = 0;
@@ -405,21 +409,23 @@ export async function ingestWorks(
         );
       }
 
-      await client.query(
-        `
-        INSERT INTO "Work" (ol_work_key, title, subtitle, description, first_publish_year, ol_revision, ol_last_modified, updated_at)
-        VALUES ${valuePlaceholders.join(", ")}
-        ON CONFLICT (ol_work_key) DO UPDATE SET
-          title = EXCLUDED.title,
-          subtitle = COALESCE(EXCLUDED.subtitle, "Work".subtitle),
-          description = COALESCE(EXCLUDED.description, "Work".description),
-          first_publish_year = COALESCE(EXCLUDED.first_publish_year, "Work".first_publish_year),
-          ol_revision = EXCLUDED.ol_revision,
-          ol_last_modified = EXCLUDED.ol_last_modified,
-          updated_at = NOW()
-        `,
-        values
-      );
+      // Fast mode: simple INSERT (requires empty table, ~10x faster)
+      // Normal mode: upsert with ON CONFLICT
+      const sql = fast
+        ? `INSERT INTO "Work" (ol_work_key, title, subtitle, description, first_publish_year, ol_revision, ol_last_modified, updated_at)
+           VALUES ${valuePlaceholders.join(", ")}`
+        : `INSERT INTO "Work" (ol_work_key, title, subtitle, description, first_publish_year, ol_revision, ol_last_modified, updated_at)
+           VALUES ${valuePlaceholders.join(", ")}
+           ON CONFLICT (ol_work_key) DO UPDATE SET
+             title = EXCLUDED.title,
+             subtitle = COALESCE(EXCLUDED.subtitle, "Work".subtitle),
+             description = COALESCE(EXCLUDED.description, "Work".description),
+             first_publish_year = COALESCE(EXCLUDED.first_publish_year, "Work".first_publish_year),
+             ol_revision = EXCLUDED.ol_revision,
+             ol_last_modified = EXCLUDED.ol_last_modified,
+             updated_at = NOW()`;
+
+      await client.query(sql, values);
 
       // 2. Collect all unique subjects and bulk insert
       const allSubjects = new Map<string, string>();
@@ -441,7 +447,7 @@ export async function ingestWorks(
         }
 
         await client.query(
-          `INSERT INTO "Subject" (subject, typ) VALUES ${subjectPlaceholders.join(", ")} ON CONFLICT DO NOTHING`,
+          `INSERT INTO "Subject" (subject, typ) VALUES ${subjectPlaceholders.join(", ")} ON CONFLICT (subject) DO NOTHING`,
           subjectValues
         );
       }
@@ -474,7 +480,7 @@ export async function ingestWorks(
             SELECT w.id, v.subject
             FROM (VALUES ${wsPlaceholders.join(", ")}) AS v(ol_key, subject)
             JOIN "Work" w ON w.ol_work_key = v.ol_key
-            ON CONFLICT DO NOTHING
+            ON CONFLICT (work_id, subject) DO NOTHING
             `,
             wsValues
           );
@@ -634,12 +640,15 @@ export async function ingestEditions(
 /**
  * Ingest authors from Open Library dump using bulk multi-row INSERT
  * This is 10-20x faster than individual INSERTs
+ *
+ * When fast=true, uses simple INSERT without ON CONFLICT (requires empty table)
  */
 export async function ingestAuthors(
   filePath: string,
-  options?: { batchSize?: number; maxItems?: number }
+  options?: { batchSize?: number; maxItems?: number; fast?: boolean }
 ): Promise<number> {
-  logger.info("Starting authors ingestion (bulk mode)", { filePath });
+  const fast = options?.fast ?? false;
+  logger.info(`Starting authors ingestion (${fast ? "FAST" : "bulk"} mode)`, { filePath, fast });
 
   const { batchSize = 5000, maxItems } = options ?? {};
   const timer = createTimer(`Processing ${filePath}`);
@@ -681,18 +690,18 @@ export async function ingestAuthors(
     }
 
     await transaction(async (client) => {
-      await client.query(
-        `
-        INSERT INTO "Author" (ol_author_key, name, bio, ol_revision, ol_last_modified)
-        VALUES ${valuePlaceholders.join(", ")}
-        ON CONFLICT (ol_author_key) DO UPDATE SET
-          name = EXCLUDED.name,
-          bio = COALESCE(EXCLUDED.bio, "Author".bio),
-          ol_revision = EXCLUDED.ol_revision,
-          ol_last_modified = EXCLUDED.ol_last_modified
-        `,
-        values
-      );
+      const sql = fast
+        ? `INSERT INTO "Author" (ol_author_key, name, bio, ol_revision, ol_last_modified)
+           VALUES ${valuePlaceholders.join(", ")}`
+        : `INSERT INTO "Author" (ol_author_key, name, bio, ol_revision, ol_last_modified)
+           VALUES ${valuePlaceholders.join(", ")}
+           ON CONFLICT (ol_author_key) DO UPDATE SET
+             name = EXCLUDED.name,
+             bio = COALESCE(EXCLUDED.bio, "Author".bio),
+             ol_revision = EXCLUDED.ol_revision,
+             ol_last_modified = EXCLUDED.ol_last_modified`;
+
+      await client.query(sql, values);
     });
 
     processed += batch.length;
@@ -1123,7 +1132,7 @@ export async function linkWorkAuthors(worksFilePath: string): Promise<number> {
           SELECT w.id, a.id, 'author'
           FROM "Work" w, "Author" a
           WHERE w.ol_work_key = $1 AND a.ol_author_key = $2
-          ON CONFLICT DO NOTHING
+          ON CONFLICT (work_id, author_id, role) DO NOTHING
           `,
           [olWorkKey, olAuthorKey]
         );
@@ -1177,6 +1186,11 @@ export async function refreshMaterializedViews(): Promise<void> {
   // Refresh aggregated OL ratings
   await query(`REFRESH MATERIALIZED VIEW CONCURRENTLY "WorkOLRating"`).catch(() => {
     return query(`REFRESH MATERIALIZED VIEW "WorkOLRating"`);
+  });
+
+  // Refresh aggregated author names for works
+  await query(`REFRESH MATERIALIZED VIEW CONCURRENTLY work_authors_agg`).catch(() => {
+    return query(`REFRESH MATERIALIZED VIEW work_authors_agg`);
   });
 
   // Update the aggregate Rating table from individual OL ratings

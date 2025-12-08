@@ -1,14 +1,18 @@
-import { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
+import { Pool } from "pg";
+import type { PoolClient, QueryResult, QueryResultRow } from "pg";
+import { getEnv } from "@/lib/config/env";
+import { logger } from "@/lib/util/logger";
 
 // Singleton pool instance
 let pool: Pool | null = null;
 
 export function getPool(): Pool {
   if (!pool) {
+    const env = getEnv();
     pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      min: Number(process.env.PGPOOL_MIN ?? 2),
-      max: Number(process.env.PGPOOL_MAX ?? 20),
+      connectionString: env.DATABASE_URL,
+      min: env.PGPOOL_MIN,
+      max: env.PGPOOL_MAX,
       // Add connection timeout and idle timeout
       connectionTimeoutMillis: 30000, // 30s to get a connection
       idleTimeoutMillis: 30000, // Close idle connections after 30s
@@ -16,7 +20,7 @@ export function getPool(): Pool {
 
     // Handle pool errors
     pool.on("error", (err) => {
-      console.error("Unexpected error on idle client", err);
+      logger.error("Unexpected error on idle client", { error: String(err) });
     });
   }
   return pool;
@@ -43,7 +47,7 @@ async function getClientWithRetry(maxRetries = 3): Promise<PoolClient> {
       // Retry on "too many clients" or timeout errors
       if (errMsg.includes("too many clients") || errMsg.includes("timeout")) {
         const delay = Math.min(1000 * Math.pow(2, attempt), 5000); // Exponential backoff, max 5s
-        console.warn(`Connection pool exhausted, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+        logger.warn("Connection pool exhausted, retrying", { delayMs: delay, attempt: attempt + 1, maxRetries });
         await sleep(delay);
         continue;
       }
@@ -81,7 +85,15 @@ export async function transaction<T>(
     await client.query("COMMIT");
     return result;
   } catch (error) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      // Log rollback failure but throw the original error
+      logger.error("Transaction rollback failed", {
+        rollbackError: String(rollbackError),
+        originalError: String(error),
+      });
+    }
     throw error;
   } finally {
     client.release();

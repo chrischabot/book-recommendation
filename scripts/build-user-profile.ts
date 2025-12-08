@@ -21,8 +21,26 @@ const { values } = parseArgs({
   allowPositionals: true,
 });
 
+// Cleanup on exit
+async function cleanup() {
+  await closePool();
+}
+
+// Handle process signals
+process.on("SIGINT", async () => {
+  logger.info("Received SIGINT, cleaning up...");
+  await cleanup();
+  process.exit(0);
+});
+
+process.on("SIGTERM", async () => {
+  logger.info("Received SIGTERM, cleaning up...");
+  await cleanup();
+  process.exit(0);
+});
+
 async function main() {
-  const userId = values.user!;
+  const userId = values.user ?? "me";
 
   logger.info("Building user profile", { userId });
 
@@ -30,7 +48,6 @@ async function main() {
 
   if (profile.profileVec.length === 0) {
     logger.warn("No profile could be built - no events with embeddings found");
-    await closePool();
     return;
   }
 
@@ -43,11 +60,11 @@ async function main() {
   // Get taste summary
   const taste = await getUserTasteSummary(userId);
   logger.info("Taste summary", taste);
-
-  await closePool();
 }
 
-main().catch((error) => {
-  logger.error("Profile build failed", { error: String(error) });
-  process.exit(1);
-});
+main()
+  .catch((error) => {
+    logger.error("Profile build failed", { error: String(error) });
+    process.exit(1);
+  })
+  .finally(cleanup);

@@ -1,19 +1,41 @@
-import { NextRequest, NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 import { generateByBookCandidates } from "@/lib/recs/candidates";
 import { rerankCandidates } from "@/lib/recs/rerank";
 import { explainRecommendations } from "@/lib/recs/explain";
 import { query } from "@/lib/db/pool";
 import { logger } from "@/lib/util/logger";
+import { isDevelopment } from "@/lib/config/env";
+
+/**
+ * Parse and validate a positive integer parameter
+ */
+function parsePositiveInt(
+  value: string | null,
+  defaultValue: number,
+  max?: number
+): number | null {
+  if (!value) return defaultValue;
+  const parsed = parseInt(value, 10);
+  if (isNaN(parsed) || parsed < 1) return null;
+  return max ? Math.min(parsed, max) : parsed;
+}
 
 export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
     const userId = searchParams.get("user_id") ?? "me";
     const workIdParam = searchParams.get("work_id");
-    const limit = Math.min(
-      parseInt(searchParams.get("k") ?? "100", 10),
-      200
-    );
+
+    // Validate limit parameter
+    const limit = parsePositiveInt(searchParams.get("k"), 100, 200);
+    if (limit === null) {
+      return NextResponse.json(
+        { error: "k must be a positive integer" },
+        { status: 400 }
+      );
+    }
+
     const includeExplanations = searchParams.get("explain") !== "false";
     const fastMode = searchParams.get("fast") !== "false"; // Fast by default
 
@@ -25,9 +47,9 @@ export async function GET(request: NextRequest) {
     }
 
     const seedWorkId = parseInt(workIdParam, 10);
-    if (isNaN(seedWorkId)) {
+    if (isNaN(seedWorkId) || seedWorkId < 1) {
       return NextResponse.json(
-        { error: "work_id must be a number" },
+        { error: "work_id must be a positive integer" },
         { status: 400 }
       );
     }
@@ -85,10 +107,23 @@ export async function GET(request: NextRequest) {
       total: finalRecs.length,
     });
   } catch (error) {
-    logger.error("By-book recommendations error", { error: String(error) });
-    return NextResponse.json(
-      { error: "Failed to generate recommendations" },
-      { status: 500 }
-    );
+    const errorMessage = String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+
+    logger.error("By-book recommendations error", {
+      error: errorMessage,
+      stack: errorStack,
+    });
+
+    // Include error details in development for easier debugging
+    const responseBody = isDevelopment()
+      ? {
+          error: "Failed to generate recommendations",
+          details: errorMessage,
+          stack: errorStack,
+        }
+      : { error: "Failed to generate recommendations" };
+
+    return NextResponse.json(responseBody, { status: 500 });
   }
 }

@@ -3,12 +3,11 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft, User, BookOpen } from "lucide-react";
 import { notFound } from "next/navigation";
-import { query } from "@/lib/db/pool";
-import { getCoverUrl } from "@/lib/util/covers";
 import { BookGridSkeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { BookGrid } from "@/components/book-grid";
 import { Pagination, PageInfo } from "@/components/pagination";
+import { RetryButton } from "@/components/ui/retry-button";
 import type { ExplainedRecommendation } from "@/lib/recs/explain";
 
 interface AuthorDetails {
@@ -19,119 +18,63 @@ interface AuthorDetails {
   bookCount: number;
 }
 
-async function getAuthorDetails(authorId: number): Promise<AuthorDetails | null> {
-  const { rows } = await query<{
-    id: number;
-    name: string;
-    bio: string | null;
-    ol_author_key: string | null;
-    book_count: string;
-  }>(
-    `SELECT
-       a.id,
-       a.name,
-       a.bio,
-       a.ol_author_key,
-       COUNT(DISTINCT wa.work_id) as book_count
-     FROM "Author" a
-     LEFT JOIN "WorkAuthor" wa ON a.id = wa.author_id
-     WHERE a.id = $1
-     GROUP BY a.id`,
-    [authorId]
-  );
-
-  if (rows.length === 0) return null;
-
-  const row = rows[0];
-  return {
-    id: row.id,
-    name: row.name,
-    bio: row.bio,
-    olAuthorKey: row.ol_author_key,
-    bookCount: parseInt(row.book_count, 10),
-  };
+interface AuthorBooksResponse {
+  author: AuthorDetails;
+  books: ExplainedRecommendation[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
 }
 
-interface AuthorBook {
-  workId: number;
-  title: string;
-  year: number | null;
-  description: string | null;
-  coverUrl: string | null;
-  avgRating: number | null;
-  ratingCount: number | null;
+interface ApiError {
+  error: string;
+  details?: string;
+  stack?: string;
 }
 
-async function getBooksByAuthor(
+class AuthorPageError extends Error {
+  details?: string;
+  stack?: string;
+  status: number;
+
+  constructor(message: string, status: number, details?: string, stack?: string) {
+    super(message);
+    this.name = "AuthorPageError";
+    this.status = status;
+    this.details = details;
+    this.stack = stack;
+  }
+}
+
+async function getAuthorBooks(
   authorId: number,
   page: number,
   pageSize: number
-): Promise<{ books: AuthorBook[]; total: number }> {
-  // Get total count
-  const { rows: countRows } = await query<{ count: string }>(
-    `SELECT COUNT(DISTINCT wa.work_id) as count
-     FROM "WorkAuthor" wa
-     WHERE wa.author_id = $1`,
-    [authorId]
-  );
-  const total = parseInt(countRows[0]?.count ?? "0", 10);
-
-  // Get paginated books sorted by quality
-  const offset = (page - 1) * pageSize;
-  const { rows } = await query<{
-    work_id: number;
-    title: string;
-    first_publish_year: number | null;
-    description: string | null;
-    cover_id: string | null;
-    isbn13: string | null;
-    ol_work_key: string | null;
-    avg_rating: string | null;
-    rating_count: number | null;
-    authors: string;
-  }>(
-    `WITH author_works AS (
-       SELECT DISTINCT ON (w.id)
-         w.id as work_id,
-         w.title,
-         w.first_publish_year,
-         w.description,
-         e.cover_id,
-         e.isbn13,
-         w.ol_work_key,
-         wq.blended_avg as avg_rating,
-         wq.total_ratings as rating_count,
-         COALESCE(waa.author_names, '') as authors
-       FROM "WorkAuthor" wa
-       JOIN "Work" w ON wa.work_id = w.id
-       LEFT JOIN work_authors_agg waa ON w.id = waa.work_id
-       LEFT JOIN "WorkQuality" wq ON w.id = wq.work_id
-       LEFT JOIN "Edition" e ON w.id = e.work_id
-       WHERE wa.author_id = $1
-       ORDER BY w.id, e.cover_id NULLS LAST
-     )
-     SELECT * FROM author_works
-     ORDER BY avg_rating DESC NULLS LAST, rating_count DESC NULLS LAST
-     LIMIT $2 OFFSET $3`,
-    [authorId, pageSize, offset]
+): Promise<AuthorBooksResponse> {
+  const baseUrl = process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
+  const res = await fetch(
+    `${baseUrl}/api/books/by-author?author_id=${authorId}&page=${page}&page_size=${pageSize}`,
+    { cache: "no-store" }
   );
 
-  const books = rows.map((row) => ({
-    workId: row.work_id,
-    title: row.title,
-    year: row.first_publish_year,
-    description: row.description,
-    coverUrl: getCoverUrl({
-      coverId: row.cover_id,
-      isbn13: row.isbn13,
-      olWorkKey: row.ol_work_key,
-    }),
-    avgRating: row.avg_rating ? parseFloat(row.avg_rating) : null,
-    ratingCount: row.rating_count,
-    authors: row.authors?.split(", ").filter(Boolean) ?? [],
-  }));
+  if (!res.ok) {
+    let apiError: ApiError | null = null;
+    try {
+      apiError = await res.json();
+    } catch {
+      // Failed to parse error response
+    }
 
-  return { books, total };
+    throw new AuthorPageError(
+      apiError?.error ?? "Failed to fetch author books",
+      res.status,
+      apiError?.details,
+      apiError?.stack
+    );
+  }
+
+  return res.json();
 }
 
 export async function generateMetadata(props: {
@@ -144,16 +87,15 @@ export async function generateMetadata(props: {
     return { title: "Author Not Found" };
   }
 
-  const author = await getAuthorDetails(authorId);
-
-  if (!author) {
+  try {
+    const data = await getAuthorBooks(authorId, 1, 1);
+    return {
+      title: `${data.author.name} - Books`,
+      description: data.author.bio?.slice(0, 160) ?? `Browse all books by ${data.author.name}`,
+    };
+  } catch {
     return { title: "Author Not Found" };
   }
-
-  return {
-    title: `${author.name} - Books`,
-    description: author.bio?.slice(0, 160) ?? `Browse all books by ${author.name}`,
-  };
 }
 
 export default async function AuthorPage(props: {
@@ -170,15 +112,27 @@ export default async function AuthorPage(props: {
     notFound();
   }
 
-  const author = await getAuthorDetails(authorId);
-
-  if (!author) {
-    notFound();
-  }
-
   return (
     <div className="min-h-screen">
-      {/* Header */}
+      <Suspense fallback={<HeaderSkeleton />}>
+        <AuthorHeader authorId={authorId} />
+      </Suspense>
+
+      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+        <Suspense fallback={<LoadingState />}>
+          <AuthorBooksContent authorId={authorId} page={page} pageSize={pageSize} />
+        </Suspense>
+      </div>
+    </div>
+  );
+}
+
+async function AuthorHeader({ authorId }: { authorId: number }) {
+  try {
+    const data = await getAuthorBooks(authorId, 1, 1);
+    const author = data.author;
+
+    return (
       <div className="border-b border-border bg-background-warm">
         <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
           <Button
@@ -226,15 +180,13 @@ export default async function AuthorPage(props: {
           </div>
         </div>
       </div>
-
-      {/* Content */}
-      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-        <Suspense fallback={<LoadingState />}>
-          <AuthorBooksContent authorId={authorId} page={page} pageSize={pageSize} />
-        </Suspense>
-      </div>
-    </div>
-  );
+    );
+  } catch (error) {
+    if (error instanceof AuthorPageError && error.status === 404) {
+      notFound();
+    }
+    throw error;
+  }
 }
 
 async function AuthorBooksContent({
@@ -246,66 +198,125 @@ async function AuthorBooksContent({
   page: number;
   pageSize: number;
 }) {
-  const { books, total } = await getBooksByAuthor(authorId, page, pageSize);
-  const totalPages = Math.ceil(total / pageSize);
+  try {
+    const data = await getAuthorBooks(authorId, page, pageSize);
+    const { books, total, totalPages } = data;
 
-  if (books.length === 0) {
+    if (books.length === 0) {
+      return (
+        <div className="text-center py-16 bg-muted/30 rounded-2xl">
+          <BookOpen className="h-12 w-12 mx-auto text-foreground-muted mb-4" />
+          <h2 className="font-display text-xl font-semibold text-foreground">
+            No Books Found
+          </h2>
+          <p className="mt-2 text-foreground-muted max-w-md mx-auto">
+            We don't have any books by this author yet.
+          </p>
+          <Button asChild className="mt-6">
+            <Link href="/recommendations">Browse Recommendations</Link>
+          </Button>
+        </div>
+      );
+    }
+
     return (
-      <div className="text-center py-16 bg-muted/30 rounded-2xl">
-        <BookOpen className="h-12 w-12 mx-auto text-foreground-muted mb-4" />
-        <h2 className="font-display text-xl font-semibold text-foreground">
-          No Books Found
+      <div className="space-y-8">
+        <div className="flex items-center justify-between">
+          <PageInfo
+            currentPage={page}
+            pageSize={pageSize}
+            totalItems={total}
+          />
+        </div>
+
+        <BookGrid recommendations={books} />
+
+        {totalPages > 1 && (
+          <div className="pt-6 border-t border-border">
+            <Pagination currentPage={page} totalPages={totalPages} />
+          </div>
+        )}
+      </div>
+    );
+  } catch (error) {
+    const pageError = error instanceof AuthorPageError ? error : null;
+    const isDev = process.env.NODE_ENV === "development";
+
+    return (
+      <div className="text-center py-16">
+        <div className="mx-auto w-16 h-16 rounded-2xl bg-red-100 dark:bg-red-900/30 flex items-center justify-center mb-6">
+          <svg
+            className="h-8 w-8 text-red-600 dark:text-red-400"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+            />
+          </svg>
+        </div>
+        <h2 className="font-display text-2xl font-bold text-foreground">
+          Failed to Load Books
         </h2>
-        <p className="mt-2 text-foreground-muted max-w-md mx-auto">
-          We don't have any books by this author yet.
+        <p className="mt-3 text-foreground-muted max-w-md mx-auto">
+          We couldn't fetch the books for this author. Please try again.
         </p>
-        <Button asChild className="mt-6">
-          <Link href="/recommendations">Browse Recommendations</Link>
-        </Button>
+
+        {isDev && pageError && (pageError.details || pageError.stack) && (
+          <div className="mt-6 max-w-2xl mx-auto text-left">
+            <details className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-lg p-4">
+              <summary className="cursor-pointer font-medium text-red-800 dark:text-red-300 text-sm">
+                Error Details (Development Only)
+              </summary>
+              <div className="mt-3 space-y-3">
+                {pageError.details && (
+                  <div>
+                    <h4 className="text-xs font-semibold text-red-700 dark:text-red-400 uppercase tracking-wide">
+                      Details
+                    </h4>
+                    <p className="mt-1 text-sm text-red-600 dark:text-red-300 font-mono">
+                      {pageError.details}
+                    </p>
+                  </div>
+                )}
+                {pageError.stack && (
+                  <div>
+                    <h4 className="text-xs font-semibold text-red-700 dark:text-red-400 uppercase tracking-wide">
+                      Stack Trace
+                    </h4>
+                    <pre className="mt-1 text-xs text-red-600 dark:text-red-300 font-mono overflow-x-auto whitespace-pre-wrap break-all">
+                      {pageError.stack}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            </details>
+          </div>
+        )}
+
+        <RetryButton className="mt-6" />
       </div>
     );
   }
+}
 
-  // Convert to ExplainedRecommendation format for BookGrid
-  const recommendations: ExplainedRecommendation[] = books.map((book) => ({
-    workId: book.workId,
-    title: book.title,
-    authors: (book as { authors?: string[] }).authors ?? [],
-    year: book.year,
-    description: book.description ?? undefined,
-    coverUrl: book.coverUrl ?? undefined,
-    avgRating: book.avgRating,
-    ratingCount: book.ratingCount,
-    relevanceScore: 0,
-    qualityScore: 0,
-    diversityScore: 0,
-    engagementScore: 0,
-    finalScore: 0,
-    suggestionQuality: "B",
-    confidence: 0,
-    reasons: [],
-  }));
-
+function HeaderSkeleton() {
   return (
-    <div className="space-y-8">
-      {/* Controls */}
-      <div className="flex items-center justify-between">
-        <PageInfo
-          currentPage={page}
-          pageSize={pageSize}
-          totalItems={total}
-        />
-      </div>
-
-      {/* Books grid */}
-      <BookGrid recommendations={recommendations} />
-
-      {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="pt-6 border-t border-border">
-          <Pagination currentPage={page} totalPages={totalPages} />
+    <div className="border-b border-border bg-background-warm">
+      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+        <div className="h-8 w-48 bg-muted rounded animate-pulse mb-4" />
+        <div className="flex items-start gap-4">
+          <div className="w-14 h-14 rounded-xl bg-muted animate-pulse" />
+          <div className="space-y-3">
+            <div className="h-10 w-64 bg-muted rounded animate-pulse" />
+            <div className="h-5 w-32 bg-muted rounded animate-pulse" />
+          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }

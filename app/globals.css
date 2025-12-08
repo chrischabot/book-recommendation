@@ -133,6 +133,28 @@
     @apply border-border;
   }
 
+  /* Focus styles for keyboard accessibility */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-primary;
+    outline-style: solid;
+  }
+
+  /* Remove default focus outline since we're using focus-visible */
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  /* Enhanced focus for interactive elements */
+  a:focus-visible,
+  button:focus-visible,
+  [role="button"]:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    @apply outline-2 outline-offset-2 outline-primary ring-2 ring-primary/20;
+    outline-style: solid;
+  }
+
   html {
     @apply scroll-smooth antialiased;
     text-rendering: optimizeLegibility;

@@ -1,6 +1,7 @@
-import { PoolClient } from "pg";
-import { getPool, query, withClient } from "./pool";
+import type { PoolClient } from "pg";
+import { query, withClient } from "./pool";
 import { toVectorLiteral } from "./vector";
+import { logger } from "@/lib/util/logger";
 
 /**
  * Find K nearest neighbors by vector similarity (cosine distance)
@@ -86,13 +87,40 @@ export async function getUserBlocks(
   );
 
   return {
-    workIds: rows.filter((r) => r.work_id !== null).map((r) => r.work_id!),
-    authorIds: rows.filter((r) => r.author_id !== null).map((r) => r.author_id!),
+    workIds: rows
+      .map((r) => r.work_id)
+      .filter((id): id is number => id !== null),
+    authorIds: rows
+      .map((r) => r.author_id)
+      .filter((id): id is number => id !== null),
   };
 }
 
 /**
+ * Safely escape a string for Cypher query inclusion
+ * Handles single quotes, backslashes, and other special characters
+ */
+function escapeCypherString(value: string): string {
+  // Escape backslashes first, then single quotes
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
+}
+
+/**
+ * Validate parameter key to prevent regex injection
+ * Only allows alphanumeric characters and underscores
+ */
+function isValidParamKey(key: string): boolean {
+  return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key);
+}
+
+/**
  * Execute an AGE Cypher query
+ * Note: AGE doesn't support parameterized Cypher directly, so we use safe substitution
  */
 export async function cypherQuery<T>(
   cypherStatement: string,
@@ -103,31 +131,61 @@ export async function cypherQuery<T>(
     await client.query(`LOAD 'age'`);
     await client.query(`SET search_path = ag_catalog, "$user", public`);
 
-    // Build parameter substitution
+    // Build parameter substitution with proper validation and escaping
     const paramEntries = Object.entries(params);
     let processedCypher = cypherStatement;
 
-    // AGE doesn't support parameterized Cypher directly, so we substitute
     for (const [key, value] of paramEntries) {
-      const placeholder = `$${key}`;
+      // Validate parameter key to prevent regex injection
+      if (!isValidParamKey(key)) {
+        throw new Error(`Invalid Cypher parameter key: ${key}. Only alphanumeric characters and underscores allowed.`);
+      }
+
       let replacement: string;
 
       if (typeof value === "string") {
-        replacement = `'${value.replace(/'/g, "''")}'`;
+        // Properly escape string values for Cypher
+        replacement = `'${escapeCypherString(value)}'`;
       } else if (typeof value === "number") {
+        // Validate number to prevent NaN/Infinity injection
+        if (!Number.isFinite(value)) {
+          throw new Error(`Invalid number value for parameter ${key}: ${value}`);
+        }
         replacement = String(value);
       } else if (typeof value === "boolean") {
         replacement = value ? "true" : "false";
-      } else if (value === null) {
+      } else if (value === null || value === undefined) {
         replacement = "null";
+      } else if (Array.isArray(value)) {
+        // Handle arrays safely
+        const escapedItems = value.map((item) => {
+          if (typeof item === "string") {
+            return `'${escapeCypherString(item)}'`;
+          } else if (typeof item === "number" && Number.isFinite(item)) {
+            return String(item);
+          } else if (typeof item === "boolean") {
+            return item ? "true" : "false";
+          } else if (item === null) {
+            return "null";
+          }
+          throw new Error(`Unsupported array item type for parameter ${key}`);
+        });
+        replacement = `[${escapedItems.join(", ")}]`;
       } else {
-        replacement = JSON.stringify(value);
+        throw new Error(`Unsupported parameter type for ${key}: ${typeof value}`);
       }
 
+      // Use word boundary matching with validated key
       processedCypher = processedCypher.replace(
         new RegExp(`\\$${key}\\b`, "g"),
         replacement
       );
+    }
+
+    // Additional safety: check for unsubstituted parameters
+    const unsubstituted = processedCypher.match(/\$[a-zA-Z_][a-zA-Z0-9_]*/g);
+    if (unsubstituted && unsubstituted.length > 0) {
+      console.warn(`Cypher query has unsubstituted parameters: ${unsubstituted.join(", ")}`);
     }
 
     const result = await client.query(
@@ -169,7 +227,7 @@ export async function getGraphNeighbors(
     // AGE extension may not be installed - this is expected, just skip graph features
     const errMsg = String(error);
     if (!errMsg.includes("age") && !errMsg.includes("No such file")) {
-      console.error("Graph neighbor query failed:", error);
+      logger.error("Graph neighbor query failed", { error: errMsg, workId });
     }
     return [];
   }

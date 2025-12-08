@@ -3,14 +3,17 @@
 **TypeScript‑first • Next.js App Router • PostgreSQL 16 + pgvector + Apache AGE (Postgres‑native graph) • OpenAI (embeddings + explanations) • No ORM (direct Postgres)**
 
 A comprehensive, buildable plan for a *personal* book recommender that:
-1) ingests a modern book catalog (normalized to **works**) and enriches ratings,
-2) imports your history (**Goodreads CSV** + **Amazon/Kindle export**),
-3) models your taste with **vectors** and **graph features** (Postgres‑native via **Apache AGE**),
-4) returns **100 de‑duplicated, diverse, high‑confidence recommendations**,
-5) serves **general**, **by‑book**, and **by‑category** recommendations (paginated),
-6) renders a **beautiful Next.js UI**: cover, title, author, publish year, rating, **suggestion quality & reason**, and description,
-7) uses **caching** aggressively across ingestion, features, API, and UI for speed,
-8) uses **direct Postgres** (no Prisma) for full control of pgvector & AGE queries.
+1) ✅ ingests a modern book catalog (normalized to **works**) and enriches ratings,
+2) ✅ imports your history (**Goodreads CSV** + **Amazon/Kindle export**),
+3) ✅ models your taste with **vectors** and engagement-weighted **graph features**,
+4) ✅ returns **100 de‑duplicated, diverse, high‑confidence recommendations**,
+5) ✅ serves **general**, **by‑book**, and **by‑category** recommendations (paginated),
+6) ✅ renders a **beautiful Next.js UI**: cover, title, author, publish year, rating, **suggestion quality & reason**, and description,
+7) ✅ uses **caching** aggressively across ingestion, features, API, and UI for speed,
+8) ✅ uses **direct Postgres** (no Prisma) for full control of pgvector & AGE queries,
+9) ✅ provides **full-text fuzzy search** via pg_trgm for title/author matching,
+10) ✅ computes **collaborative filtering** via book co-occurrence and community detection,
+11) ✅ displays **Reading DNA profile** with engagement signal visualization.
 
 > This file is designed for you **and** a code‑generation agent. It includes human steps, scripts, and dependencies.
 
@@ -697,9 +700,129 @@ pnpm download:ol -- --force
 - Materialize & refresh on schedule.
 
 ### 10.3 User profile vector
-- Positive core: high ratings & recent `UserEvent`; negatives from `dnf`/low ratings.  
-- `u = normalize(Σ w_i * v_i)`; store in `user_profile`.  
+- Positive core: high ratings & recent `UserEvent`; negatives from `dnf`/low ratings.
+- `u = normalize(Σ w_i * v_i)`; store in `user_profile`.
 - Anchors (top contributors) saved for explanations.
+
+### 10.3.1 Engagement Signal Weighting Algorithm
+
+The user profile vector weight calculation incorporates multiple engagement signals from Kindle reading data. Each book's contribution to the taste profile is computed through a multi-stage weighting process:
+
+**Base Weight Calculation:**
+```
+magnitude = 1.0
+```
+
+**Stage 1: Rating-Based Weight (exponential scaling)**
+```
+if rating exists:
+  magnitude *= 2^((rating - 3) / 2)
+  // 5-star → 2.0x, 4-star → 1.5x, 3-star → 1.0x, 2-star → 0.5x, 1-star → 0.25x
+```
+
+**Stage 2: Explicit 5-Star Boost**
+```
+if rating == 5:
+  magnitude *= 2.0  // Explicit 5-star = very strong signal
+```
+
+**Stage 3: Recency Decay (variable half-life)**
+```
+hasHighEngagement = completionCount >= 3 OR avgSessionMin >= 15 OR maxSessionMin >= 120
+halfLife = hasHighEngagement ? 4 years : 2 years
+magnitude *= 0.5^(ageInYears / halfLife)
+```
+
+**Stage 4: Reading Intensity Boost (diminishing returns)**
+```
+if totalMs > 0:
+  hours = totalMs / 3,600,000
+  intensityBoost = 1 + min(1, log10(hours + 1))
+  magnitude *= intensityBoost
+```
+
+**Stage 5: Recent Activity Boost (last 30 days)**
+```
+if recentMs > 0:
+  magnitude *= 1.1
+```
+
+**Stage 6: Re-Read Multiplier (strong favorite signal)**
+```
+if completionCount > 1:
+  rereadMultiplier = min(3.0, 1.5^(completionCount - 1))
+  magnitude *= rereadMultiplier
+  // 2 reads → 1.5x, 3 reads → 2.25x, 4+ reads → 3x (capped)
+```
+
+**Stage 7: Session Quality (avg session length = engagement)**
+```
+if avgSessionMin > 0:
+  sessionQuality = 1 + min(0.5, avgSessionMin / 30)
+  magnitude *= sessionQuality
+  // 15 min avg → 1.25x, 30+ min avg → 1.5x
+```
+
+**Stage 8: Binge Factor (max session = "couldn't put it down")**
+```
+if maxSessionMin > 0:
+  bingeFactor = 1 + min(0.5, maxSessionMin / 240)
+  magnitude *= bingeFactor
+  // 2hr max → 1.25x, 4+ hr max → 1.5x
+```
+
+**Stage 9: Author Loyalty Multiplier**
+```
+if authorBooksRead >= 3:
+  loyaltyMultiplier = min(2.0, 1 + (authorBooksRead - 2) * 0.25)
+  magnitude *= loyaltyMultiplier
+  // 3 books → 1.25x, 4 books → 1.5x, 6+ books → 2.0x
+```
+
+**Stage 10: Series Velocity (binge-reading series)**
+```
+if finishedWithin3DaysOfPrevious:
+  magnitude *= 1.3  // Rapid series consumption
+```
+
+**Stage 11: Purchase Commitment Signal**
+```
+if originType == 'Purchase':
+  magnitude *= 1.15  // Paid money = higher commitment
+```
+
+**Stage 12: Shelf-Based Final Adjustment**
+```
+switch shelf:
+  case 'read':
+    return magnitude * 1.0
+  case 'currently-reading':
+    return magnitude * 0.8
+  case 'to-read':
+    return magnitude * 0.3
+  case 'dnf':
+    // Inverted logic: DNF after 6+ hours = liked it (variety break)
+    // DNF under 6 hours = genuine dislike
+    if totalHours >= 6:
+      return magnitude * 0.0  // Neutral (liked but wanted variety)
+    else:
+      return magnitude * -0.5  // Negative signal (didn't engage)
+```
+
+**Signal Summary Table:**
+
+| Signal | Source | Effect | Rationale |
+|--------|--------|--------|-----------|
+| 5-star rating | Goodreads | 4x base | Explicit preference declaration |
+| Re-reads (3+) | Kindle completion events | Up to 3x | Re-reading = favorite |
+| Max binge session | Kindle sessions | Up to 1.5x | "Couldn't put it down" |
+| Avg session length | Kindle sessions | Up to 1.5x | Deep engagement |
+| Author loyalty | Derived from UserEvent | Up to 2x | Following an author's work |
+| Series velocity | Derived from finish dates | 1.3x | Binge-reading a series |
+| Purchase vs KU | Kindle ownership | 1.15x | Financial commitment |
+| DNF < 6 hours | Kindle + shelf | -0.5x | Genuine dislike |
+| DNF >= 6 hours | Kindle + shelf | 0x (neutral) | Variety break, not dislike |
+| High engagement decay | Kindle metrics | 4yr vs 2yr half-life | Favorites stay relevant longer |
 
 ### 10.4 Graph features (Apache AGE)
 - Load nodes/edges from relational tables into AGE graph `books`.  
@@ -936,6 +1059,47 @@ pnpm dev
 
 ## 18) Compliance
 
-- Use **Open Library** dumps/APIs and **Google Books** API only; no scraping of restricted sources.  
-- Goodreads via **user CSV export**; Amazon via **Request Your Data**.  
+- Use **Open Library** dumps/APIs and **Google Books** API only; no scraping of restricted sources.
+- Goodreads via **user CSV export**; Amazon via **Request Your Data**.
 - Personal data remains local; encrypt at rest if deploying remotely.
+
+
+---
+
+## 19) Recent Implementations (December 2025)
+
+### Search (`/search`)
+- Full-text fuzzy search using PostgreSQL `pg_trgm` extension
+- Searches both title and author name with trigram similarity
+- Paginated results with match type indicators (title vs author match)
+- GIN indexes for sub-second response times across millions of works
+
+### Reading DNA Profile (`/profile`)
+- Visualizes anchor books that shape recommendations
+- Displays engagement signals per book (5-star, re-read, binge, etc.)
+- Favorite button to manually boost a book's influence
+- API endpoints: `GET /api/profile`, `GET/POST/DELETE /api/profile/favorites`
+
+### Collaborative Filtering Infrastructure
+- `WorkCooccurrence` table storing Jaccard similarity between work pairs
+- `BookCommunity` table for detected reading clusters
+- `Work.community_id` column for community-based recommendations
+- Scripts: `build-cooccurrence.ts`, `build-communities.ts`
+
+### Performance Indexes (migrations 015-017)
+- `work_embedding_ivfflat`: IVFFlat index with 500 lists for vector search
+- `work_title_trgm_idx`, `author_name_trgm_idx`: Trigram indexes for fuzzy search
+- `cooccurrence_a_jaccard_idx`: B-tree indexes for collaborative filtering
+- Concurrent index creation to avoid table locks
+
+### Error Handling
+- `app/error.tsx`: Route-level error boundary with retry functionality
+- `app/global-error.tsx`: Root-level fallback for critical errors
+- Development mode shows expandable stack traces
+- Production mode logs errors but shows generic messages
+
+### Maintenance Scripts
+- `backup-embeddings.ts`: Backup embeddings before destructive migrations
+- `dedupe-cross-source.ts`: Merge duplicate works across OL/GB/Kindle sources
+- `enrich-authors.ts`: Fetch missing author metadata
+- `link-work-authors-bulk.ts`: Bulk repair of Work-Author relationships

@@ -45,6 +45,10 @@ export interface ExplainedRecommendation extends RankedRecommendation {
   };
   wikidataId?: string;
   subjects?: string[];
+  // Resolution/source metadata
+  source?: "openlibrary" | "googlebooks" | "amazon" | "royalroad" | "goodreads" | "manual";
+  isStub?: boolean;
+  stubReason?: string;
 }
 
 /**

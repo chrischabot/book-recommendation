@@ -20,6 +20,24 @@ interface RecommendationsResponse {
   totalPages: number;
 }
 
+interface ApiError {
+  error: string;
+  details?: string;
+  stack?: string;
+}
+
+class RecommendationError extends Error {
+  details?: string;
+  stack?: string;
+
+  constructor(message: string, details?: string, stack?: string) {
+    super(message);
+    this.name = "RecommendationError";
+    this.details = details;
+    this.stack = stack;
+  }
+}
+
 async function getRecommendations(
   page: number,
   pageSize: number
@@ -31,7 +49,19 @@ async function getRecommendations(
   );
 
   if (!res.ok) {
-    throw new Error("Failed to fetch recommendations");
+    // Try to get enhanced error details from the API
+    let apiError: ApiError | null = null;
+    try {
+      apiError = await res.json();
+    } catch {
+      // Failed to parse error response
+    }
+
+    throw new RecommendationError(
+      apiError?.error ?? "Failed to fetch recommendations",
+      apiError?.details,
+      apiError?.stack
+    );
   }
 
   return res.json();
@@ -106,8 +136,14 @@ async function RecommendationsContent({
         totalPages={data.totalPages}
       />
     );
-  } catch {
-    return <ErrorState />;
+  } catch (error) {
+    const recError = error instanceof RecommendationError ? error : null;
+    return (
+      <ErrorState
+        details={recError?.details}
+        stack={recError?.stack}
+      />
+    );
   }
 }
 
@@ -183,12 +219,14 @@ function EmptyState() {
   );
 }
 
-function ErrorState() {
+function ErrorState({ details, stack }: { details?: string; stack?: string }) {
+  const isDev = process.env.NODE_ENV === "development";
+
   return (
     <div className="text-center py-16">
-      <div className="mx-auto w-16 h-16 rounded-2xl bg-red-100 flex items-center justify-center mb-6">
+      <div className="mx-auto w-16 h-16 rounded-2xl bg-red-100 dark:bg-red-900/30 flex items-center justify-center mb-6">
         <svg
-          className="h-8 w-8 text-red-600"
+          className="h-8 w-8 text-red-600 dark:text-red-400"
           fill="none"
           stroke="currentColor"
           viewBox="0 0 24 24"
@@ -208,6 +246,40 @@ function ErrorState() {
         We couldn't fetch your recommendations. Please make sure you've imported
         your reading history and try again.
       </p>
+
+      {/* Enhanced error details in development mode */}
+      {isDev && (details || stack) && (
+        <div className="mt-6 max-w-2xl mx-auto text-left">
+          <details className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-lg p-4">
+            <summary className="cursor-pointer font-medium text-red-800 dark:text-red-300 text-sm">
+              Error Details (Development Only)
+            </summary>
+            <div className="mt-3 space-y-3">
+              {details && (
+                <div>
+                  <h4 className="text-xs font-semibold text-red-700 dark:text-red-400 uppercase tracking-wide">
+                    Details
+                  </h4>
+                  <p className="mt-1 text-sm text-red-600 dark:text-red-300 font-mono">
+                    {details}
+                  </p>
+                </div>
+              )}
+              {stack && (
+                <div>
+                  <h4 className="text-xs font-semibold text-red-700 dark:text-red-400 uppercase tracking-wide">
+                    Stack Trace
+                  </h4>
+                  <pre className="mt-1 text-xs text-red-600 dark:text-red-300 font-mono overflow-x-auto whitespace-pre-wrap break-all">
+                    {stack}
+                  </pre>
+                </div>
+              )}
+            </div>
+          </details>
+        </div>
+      )}
+
       <RetryButton className="mt-6" />
     </div>
   );

@@ -44,9 +44,11 @@ export function getEnv(): Env {
   const parsed = envSchema.safeParse(process.env);
 
   if (!parsed.success) {
-    console.error("Invalid environment variables:");
-    console.error(parsed.error.flatten().fieldErrors);
-    throw new Error("Invalid environment configuration");
+    // Use console.error during startup since logger may depend on env
+    // This is intentional - logger initialization may require env vars
+    const fieldErrors = parsed.error.flatten().fieldErrors;
+    console.error("[env] Invalid environment variables:", JSON.stringify(fieldErrors, null, 2));
+    throw new Error(`Invalid environment configuration: ${Object.keys(fieldErrors).join(", ")}`);
   }
 
   cachedEnv = parsed.data;

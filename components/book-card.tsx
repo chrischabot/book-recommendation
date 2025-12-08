@@ -2,16 +2,15 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useState, type ReactNode } from "react";
+import { memo, useState } from "react";
 import { motion } from "motion/react";
 import { Clock, BookOpen, ChevronDown, Sparkles } from "lucide-react";
 import { cn, formatCount, formatHours } from "@/lib/utils";
-import { QualityBadge } from "@/components/ui/badge";
+import { QualityBadge, SourceBadge, StubWarning } from "@/components/ui/badge";
 import { InlineRating } from "@/components/ui/star-rating";
 import {
   Tooltip,
   TooltipContent,
-  TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { MarkdownDescription } from "@/components/ui/markdown-description";
@@ -27,7 +26,7 @@ interface BookCardProps {
   index?: number;
 }
 
-export function BookCard({
+export const BookCard = memo(function BookCard({
   recommendation,
   priority = false,
   showDescription = true,
@@ -52,6 +51,9 @@ export function BookCard({
     totalMs,
     lastReadAt,
     popularity,
+    source,
+    isStub,
+    stubReason,
   } = recommendation;
 
   const hasCover = coverUrl && !imageError;
@@ -136,8 +138,14 @@ export function BookCard({
               transition={{ duration: 0.3 }}
             />
 
-            {/* Quality Badge */}
-            <div className="absolute top-3 right-3 z-20">
+            {/* Quality Badge + Stub Warning */}
+            <div className="absolute top-3 right-3 z-20 flex items-center gap-1.5">
+              <StubWarning
+                isStub={isStub}
+                stubReason={stubReason}
+                confidence={confidence}
+                className="bg-card/90 backdrop-blur-sm rounded-full p-1 shadow-sm"
+              />
               <motion.div
                 initial={{ scale: 0.8, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
@@ -146,6 +154,7 @@ export function BookCard({
                 <QualityBadge
                   quality={suggestionQuality as SuggestionQuality}
                   confidence={confidence}
+                  showConfidence
                   className="shadow-lg backdrop-blur-sm"
                 />
               </motion.div>
@@ -153,33 +162,31 @@ export function BookCard({
 
             {/* Reading time badge - shown if user has engagement data */}
             {hoursRead > 0 && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div className="absolute bottom-3 left-3 z-20">
-                      <motion.div
-                        initial={{ y: 10, opacity: 0 }}
-                        animate={{ y: 0, opacity: 1 }}
-                        transition={{ delay: 0.3 + index * 0.05 }}
-                        className={cn(
-                          "flex items-center gap-1.5 rounded-full px-2.5 py-1",
-                          "bg-card/90 backdrop-blur-sm shadow-sm",
-                          "text-xs font-medium text-foreground"
-                        )}
-                      >
-                        <Clock className="h-3 w-3 text-primary" />
-                        {formatHours(hoursRead)}
-                      </motion.div>
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">
-                    <p>
-                      {formatHours(hoursRead)} reading time
-                      {lastReadLabel && ` (last: ${lastReadLabel})`}
-                    </p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="absolute bottom-3 left-3 z-20">
+                    <motion.div
+                      initial={{ y: 10, opacity: 0 }}
+                      animate={{ y: 0, opacity: 1 }}
+                      transition={{ delay: 0.3 + index * 0.05 }}
+                      className={cn(
+                        "flex items-center gap-1.5 rounded-full px-2.5 py-1",
+                        "bg-card/90 backdrop-blur-sm shadow-sm",
+                        "text-xs font-medium text-foreground"
+                      )}
+                    >
+                      <Clock className="h-3 w-3 text-primary" />
+                      {formatHours(hoursRead)}
+                    </motion.div>
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  <p>
+                    {formatHours(hoursRead)} reading time
+                    {lastReadLabel && ` (last: ${lastReadLabel})`}
+                  </p>
+                </TooltipContent>
+              </Tooltip>
             )}
           </div>
         </Link>
@@ -215,20 +222,21 @@ export function BookCard({
             )}
 
             {popularity && popularity.readCount > 0 && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="inline-flex items-center gap-1 text-foreground-subtle">
-                      <BookOpen className="h-3 w-3 text-secondary" />
-                      {formatCount(popularity.readCount)}
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    <p>{formatCount(popularity.readCount)} readers</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex items-center gap-1 text-foreground-subtle">
+                    <BookOpen className="h-3 w-3 text-secondary" />
+                    {formatCount(popularity.readCount)}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>{formatCount(popularity.readCount)} readers</p>
+                </TooltipContent>
+              </Tooltip>
             )}
+
+            {/* Source indicator */}
+            {source && <SourceBadge source={source} />}
           </div>
 
           {/* Reasons */}
@@ -295,10 +303,10 @@ export function BookCard({
       </div>
     </motion.article>
   );
-}
+});
 
 // Compact card variant for horizontal rows and sidebars
-export function BookCardCompact({
+export const BookCardCompact = memo(function BookCardCompact({
   recommendation,
   index = 0,
 }: {
@@ -306,8 +314,18 @@ export function BookCardCompact({
   index?: number;
 }) {
   const [imageError, setImageError] = useState(false);
-  const { workId, title, authors, avgRating, suggestionQuality, coverUrl } =
-    recommendation;
+  const {
+    workId,
+    title,
+    authors,
+    avgRating,
+    suggestionQuality,
+    confidence,
+    coverUrl,
+    source,
+    isStub,
+    stubReason,
+  } = recommendation;
 
   const hasCover = coverUrl && !imageError;
   const authorString = authors.length > 0 ? authors.join(", ") : undefined;
@@ -359,22 +377,30 @@ export function BookCardCompact({
             {authors.join(", ")}
           </p>
           <div className="flex items-center gap-2 mt-2">
+            <StubWarning
+              isStub={isStub}
+              stubReason={stubReason}
+              confidence={confidence}
+            />
             <QualityBadge
               quality={suggestionQuality as SuggestionQuality}
+              confidence={confidence}
+              showConfidence
               className="text-[10px] px-2 py-0.5"
             />
             {avgRating !== undefined && avgRating !== null && (
               <InlineRating rating={avgRating} className="text-xs" />
             )}
+            {source && <SourceBadge source={source} />}
           </div>
         </div>
       </Link>
     </motion.div>
   );
-}
+});
 
 // Featured book card for hero sections
-export function BookCardFeatured({
+export const BookCardFeatured = memo(function BookCardFeatured({
   recommendation,
   className,
 }: {
@@ -390,9 +416,13 @@ export function BookCardFeatured({
     avgRating,
     ratingCount,
     suggestionQuality,
+    confidence,
     reasons,
     description,
     coverUrl,
+    source,
+    isStub,
+    stubReason,
   } = recommendation;
 
   const hasCover = coverUrl && !imageError;
@@ -438,10 +468,18 @@ export function BookCardFeatured({
           {/* Gradient overlay */}
           <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-black/20 to-transparent md:bg-gradient-to-r" />
 
-          {/* Quality badge */}
-          <div className="absolute top-4 right-4">
+          {/* Quality badge + Stub Warning */}
+          <div className="absolute top-4 right-4 flex items-center gap-2">
+            <StubWarning
+              isStub={isStub}
+              stubReason={stubReason}
+              confidence={confidence}
+              className="bg-card/90 backdrop-blur-sm rounded-full p-1.5 shadow-sm"
+            />
             <QualityBadge
               quality={suggestionQuality as SuggestionQuality}
+              confidence={confidence}
+              showConfidence
               className="text-sm px-3 py-1 shadow-lg"
             />
           </div>
@@ -466,13 +504,16 @@ export function BookCardFeatured({
               </p>
             </div>
 
-            {avgRating !== undefined && avgRating !== null && (
-              <InlineRating
-                rating={avgRating}
-                count={ratingCount ?? undefined}
-                className="text-base"
-              />
-            )}
+            <div className="flex items-center gap-4">
+              {avgRating !== undefined && avgRating !== null && (
+                <InlineRating
+                  rating={avgRating}
+                  count={ratingCount ?? undefined}
+                  className="text-base"
+                />
+              )}
+              {source && <SourceBadge source={source} showLabel />}
+            </div>
 
             {description && (
               <MarkdownDescription lineClamp={3}>
@@ -516,4 +557,4 @@ export function BookCardFeatured({
       </div>
     </motion.article>
   );
-}
+});

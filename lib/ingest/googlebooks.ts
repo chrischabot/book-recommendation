@@ -7,6 +7,7 @@ import Bottleneck from "bottleneck";
 import { query, transaction } from "@/lib/db/pool";
 import { logger, createTimer } from "@/lib/util/logger";
 import { cachedFetch } from "@/lib/util/httpCache";
+import { getEnv } from "@/lib/config/env";
 
 export interface GoogleBooksVolume {
   id: string;
@@ -76,8 +77,71 @@ const CACHE_TTL_DAYS = 5;
 const MAX_RETRIES = 3;
 const INITIAL_BACKOFF_MS = 30000; // Start with 30 seconds
 
-// Track global rate limit state
-let globalBackoffUntil = 0;
+/**
+ * Thread-safe global backoff state manager.
+ * Prevents race conditions when multiple requests hit rate limits.
+ */
+class BackoffManager {
+  private backoffUntil = 0;
+  private pendingWait: Promise<void> | null = null;
+
+  /**
+   * Get the current backoff timestamp.
+   * Returns 0 if no backoff is active.
+   */
+  getBackoffUntil(): number {
+    return this.backoffUntil;
+  }
+
+  /**
+   * Atomically set backoff if the new time is later than current.
+   * Returns true if backoff was updated.
+   */
+  setBackoff(untilTimestamp: number): boolean {
+    if (untilTimestamp > this.backoffUntil) {
+      this.backoffUntil = untilTimestamp;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Wait for any active backoff to expire.
+   * Coalesces multiple waiters to avoid redundant waits.
+   */
+  async waitForBackoff(context: string): Promise<void> {
+    const now = Date.now();
+    if (this.backoffUntil <= now) {
+      return;
+    }
+
+    // If there's already a pending wait, join it
+    if (this.pendingWait) {
+      await this.pendingWait;
+      return;
+    }
+
+    const waitTime = this.backoffUntil - now;
+    logger.debug(`Waiting for global backoff: ${Math.ceil(waitTime / 1000)}s`, { context });
+
+    this.pendingWait = new Promise((resolve) => setTimeout(resolve, waitTime));
+    try {
+      await this.pendingWait;
+    } finally {
+      this.pendingWait = null;
+    }
+  }
+
+  /**
+   * Clear backoff state (useful for testing).
+   */
+  reset(): void {
+    this.backoffUntil = 0;
+    this.pendingWait = null;
+  }
+}
+
+const backoffManager = new BackoffManager();
 
 /**
  * Sleep for a given number of milliseconds
@@ -99,12 +163,7 @@ async function fetchWithRetry(
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     // Check global backoff - if any request was rate limited, all wait
-    const now = Date.now();
-    if (globalBackoffUntil > now) {
-      const waitTime = globalBackoffUntil - now;
-      logger.debug(`Waiting for global backoff: ${Math.ceil(waitTime / 1000)}s`, { context });
-      await sleep(waitTime);
-    }
+    await backoffManager.waitForBackoff(context);
 
     // Use rate limiter to space out requests
     const response = await limiter.schedule(() =>
@@ -117,7 +176,8 @@ async function fetchWithRetry(
 
     // Rate limited - set global backoff so ALL requests pause
     const backoffMs = INITIAL_BACKOFF_MS * Math.pow(2, attempt);
-    globalBackoffUntil = Date.now() + backoffMs;
+    const newBackoffUntil = Date.now() + backoffMs;
+    backoffManager.setBackoff(newBackoffUntil);
 
     if (attempt < MAX_RETRIES) {
       logger.warn(`Rate limited by Google Books API, all requests paused for ${backoffMs / 1000}s`, {
@@ -240,7 +300,7 @@ export async function searchGoogleBooks(params: GBSearchParams): Promise<GBSearc
     return null;
   }
 
-  const apiKey = process.env.GOOGLE_BOOKS_API_KEY;
+  const apiKey = getEnv().GOOGLE_BOOKS_API_KEY;
   if (!apiKey) {
     logger.warn("GOOGLE_BOOKS_API_KEY not configured");
     return null;
@@ -301,7 +361,7 @@ export async function searchGoogleBooks(params: GBSearchParams): Promise<GBSearc
  * Fetch a specific Google Books volume by ID
  */
 export async function fetchGoogleBooksById(volumeId: string): Promise<GBSearchResult | null> {
-  const apiKey = process.env.GOOGLE_BOOKS_API_KEY;
+  const apiKey = getEnv().GOOGLE_BOOKS_API_KEY;
   if (!apiKey) {
     logger.warn("GOOGLE_BOOKS_API_KEY not configured");
     return null;
@@ -423,14 +483,14 @@ export async function enrichFromGoogleBooks(options: {
             const normalized = category.toLowerCase().replace(/\s+/g, "_");
 
             await client.query(
-              `INSERT INTO "Subject" (subject, typ) VALUES ($1, 'category') ON CONFLICT DO NOTHING`,
+              `INSERT INTO "Subject" (subject, typ) VALUES ($1, 'category') ON CONFLICT (subject) DO NOTHING`,
               [normalized]
             );
 
             await client.query(
               `
               INSERT INTO "WorkSubject" (work_id, subject) VALUES ($1, $2)
-              ON CONFLICT DO NOTHING
+              ON CONFLICT (work_id, subject) DO NOTHING
               `,
               [edition.work_id, normalized]
             );

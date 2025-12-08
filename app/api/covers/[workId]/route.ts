@@ -1,4 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 import { query } from "@/lib/db/pool";
 import { unstable_cache } from "next/cache";
 
@@ -109,16 +110,25 @@ async function saveCoverToDb(
     const isbn13 = edition.isbn_13?.[0] ?? null;
     const isbn10 = edition.isbn_10?.[0] ?? null;
 
+    // Use ol_edition_key for conflict resolution since Edition table
+    // has UNIQUE constraint on ol_edition_key, not work_id
+    // A work can have multiple editions, so we insert a new one if needed
     await query(
       `INSERT INTO "Edition" (work_id, ol_edition_key, cover_id, isbn13, isbn10)
        VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (work_id) DO UPDATE SET
-         cover_id = COALESCE("Edition".cover_id, EXCLUDED.cover_id),
-         isbn13 = COALESCE("Edition".isbn13, EXCLUDED.isbn13)`,
+       ON CONFLICT (ol_edition_key) DO UPDATE SET
+         cover_id = COALESCE(EXCLUDED.cover_id, "Edition".cover_id),
+         isbn13 = COALESCE(EXCLUDED.isbn13, "Edition".isbn13),
+         isbn10 = COALESCE(EXCLUDED.isbn10, "Edition".isbn10)`,
       [workId, olEditionKey, String(coverId), isbn13, isbn10]
     );
-  } catch {
-    // Ignore errors - this is just a cache optimization
+  } catch (error) {
+    // Log error for debugging but don't fail the request
+    console.warn("Failed to save cover to database:", {
+      workId,
+      coverId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 }
 

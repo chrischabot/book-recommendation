@@ -17,6 +17,7 @@ import { closePool } from "@/lib/db/pool";
 import { logger } from "@/lib/util/logger";
 
 const { values } = parseArgs({
+  allowPositionals: true,
   options: {
     user: { type: "string", default: "me" },
     csv: { type: "string", default: "./data/goodreads/export.csv" },
